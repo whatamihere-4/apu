@@ -1,0 +1,21 @@
+diff --git a/pkg/hash/videophash/phash.go b/pkg/hash/videophash/phash.go
+index 6e586b1..645c636 100644
+--- a/pkg/hash/videophash/phash.go
++++ b/pkg/hash/videophash/phash.go
+@@ -7,6 +7,7 @@ import (
+ 	"image"
+ 	"image/color"
+ 	"math"
++	"os"
+ 
+ 	"github.com/corona10/goimagehash"
+ 	"github.com/disintegration/imaging"
+@@ -93,6 +94,8 @@ func generateSprite(encoder *ffmpeg.FFMpeg, videoFile *models.VideoFile) (image.
+ 		}
+ 
+ 		images = append(images, img)
++		// Machine-readable progress for wrappers (e.g. hasher-http): stdout stays the final hash only with -q.
++		_, _ = fmt.Fprintf(os.Stderr, "STASH_PHASH_PROGRESS %d %d\n", i+1, chunkCount)
+ 	}
+ 
+ 	// Combine all of the thumbnails into a sprite image

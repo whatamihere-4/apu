@@ -1,0 +1,14 @@
+FROM alpine:3.20
+
+# ffmpeg/ffprobe: stream-copy segmenting; python3: HTTP API (stdlib only).
+RUN apk add --no-cache \
+    ffmpeg \
+    python3
+
+RUN mkdir -p /usr/local/lib/splitter
+COPY py/file_splitter.py /usr/local/lib/splitter/file_splitter.py
+COPY py/splitter_http.py /usr/local/lib/splitter/splitter_http.py
+
+WORKDIR /work
+
+ENTRYPOINT ["python3", "-u", "/usr/local/lib/splitter/splitter_http.py"]

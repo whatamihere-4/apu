@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Studio aliases</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    :root {
+      --bg: #0e0e10;
+      --surface: #18181b;
+      --border: #2d2d33;
+      --accent: #6d5dfc;
+      --accent-hover: #8577fd;
+      --text: #e4e4e7;
+      --muted: #71717a;
+      --success: #22c55e;
+      --error: #ef4444;
+      --radius: 10px;
+    }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      padding: 2rem 1rem;
+    }
+    .page { max-width: 720px; margin: 0 auto; }
+    nav { margin-bottom: 1rem; font-size: 0.9rem; }
+    nav a { color: var(--accent); text-decoration: none; }
+    nav a:hover { text-decoration: underline; }
+    nav .muted { color: var(--muted); margin: 0 0.35rem; }
+    h1 { margin: 0 0 0.35rem; font-size: 1.6rem; }
+    .subtitle { color: var(--muted); font-size: 0.92rem; margin: 0 0 1.2rem; line-height: 1.45; }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1rem;
+      margin-bottom: 1rem;
+    }
+    label {
+      display: block;
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--muted);
+      margin-bottom: 0.35rem;
+    }
+    input, select {
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 0.9rem;
+      padding: 0.6rem 0.75rem;
+      margin-bottom: 0.75rem;
+      font-family: inherit;
+    }
+    .btn {
+      border: none;
+      border-radius: 6px;
+      padding: 0.52rem 0.9rem;
+      font-size: 0.84rem;
+      font-weight: 600;
+      background: var(--accent);
+      color: #fff;
+      cursor: pointer;
+    }
+    .btn:hover { background: var(--accent-hover); }
+    .btn.secondary {
+      background: transparent;
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+    .btn.secondary:hover { border-color: var(--accent); }
+    .btn.danger {
+      background: transparent;
+      color: #fecaca;
+      border: 1px solid rgba(239, 68, 68, 0.45);
+    }
+    #status { font-size: 0.85rem; min-height: 1.2em; margin-top: 0.5rem; }
+    #status.ok { color: var(--success); }
+    #status.err { color: var(--error); }
+    table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+    th, td {
+      text-align: left;
+      padding: 0.5rem 0.35rem;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+    th { color: var(--muted); font-weight: 600; font-size: 0.75rem; text-transform: uppercase; }
+    .row-actions { display: flex; gap: 0.35rem; flex-wrap: wrap; }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <nav>
+      <a href="/">gofup</a><span class="muted">·</span>
+      <a href="/bbcode">BBCode</a><span class="muted">·</span>
+      <span>Studio aliases</span>
+    </nav>
+    <h1>Studio aliases</h1>
+    <p class="subtitle">
+      Last-resort fallback when StashDB parent networks and <code>folders.json</code> matching cannot find a GoFile folder.
+      Normal scenes use substudio → parent network → folder lookup automatically on BBCode autofill.
+      Aliases are <strong>not</strong> in the upload folder dropdown.
+    </p>
+
+    <section class="card">
+      <h2 style="margin:0 0 0.75rem;font-size:1rem;">Add or update</h2>
+      <label for="stashdb-studio">StashDB studio name</label>
+      <input type="text" id="stashdb-studio" placeholder="My Friend's Hot Mom" autocomplete="off">
+
+      <label for="folder-name">GoFile folder (from folders.json)</label>
+      <select id="folder-name">
+        <option value="">Loading folders…</option>
+      </select>
+
+      <label for="studio-display">BBCode studio field (optional)</label>
+      <input type="text" id="studio-display" placeholder="My Friend's Hot Mom / Naughty America">
+
+      <button type="button" class="btn" id="save-btn">Save alias</button>
+      <div id="status"></div>
+    </section>
+
+    <section class="card">
+      <h2 style="margin:0 0 0.75rem;font-size:1rem;">Saved aliases</h2>
+      <div id="alias-table-wrap">Loading…</div>
+    </section>
+  </div>
+
+  <script>
+    const stashdbStudioEl = document.getElementById("stashdb-studio");
+    const folderNameEl = document.getElementById("folder-name");
+    const studioDisplayEl = document.getElementById("studio-display");
+    const saveBtn = document.getElementById("save-btn");
+    const statusEl = document.getElementById("status");
+    const tableWrapEl = document.getElementById("alias-table-wrap");
+
+    function setStatus(kind, msg) {
+      statusEl.className = kind || "";
+      statusEl.textContent = msg || "";
+    }
+
+    function esc(s) {
+      const d = document.createElement("div");
+      d.textContent = s || "";
+      return d.innerHTML;
+    }
+
+    async function loadFolders() {
+      const r = await fetch("/api/gofile_folders");
+      const data = await r.json();
+      const folders = (data.folders || []).slice().sort((a, b) => a.name.localeCompare(b.name));
+      folderNameEl.innerHTML = '<option value="">— select folder —</option>';
+      for (const f of folders) {
+        const opt = document.createElement("option");
+        opt.value = f.name;
+        opt.textContent = f.name;
+        folderNameEl.appendChild(opt);
+      }
+    }
+
+    async function loadAliases() {
+      const r = await fetch("/api/studio_aliases");
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+      const rows = data.aliases || [];
+      if (!rows.length) {
+        tableWrapEl.innerHTML = '<p style="color:var(--muted);margin:0;">No aliases yet.</p>';
+        return;
+      }
+      tableWrapEl.innerHTML = `
+        <table>
+          <thead>
+            <tr>
+              <th>StashDB studio</th>
+              <th>GoFile folder</th>
+              <th>BBCode studio</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.map((row) => `
+              <tr data-key="${esc(row.key)}">
+                <td>${esc(row.stashdb_studio)}</td>
+                <td>${esc(row.folder_name)}</td>
+                <td>${esc(row.studio_display)}</td>
+                <td class="row-actions">
+                  <button type="button" class="btn secondary btn-edit">Edit</button>
+                  <button type="button" class="btn danger btn-del">Delete</button>
+                </td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>`;
+      tableWrapEl.querySelectorAll(".btn-edit").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const tr = btn.closest("tr");
+          const key = tr.dataset.key;
+          const cells = tr.querySelectorAll("td");
+          stashdbStudioEl.value = cells[0].textContent;
+          folderNameEl.value = cells[1].textContent;
+          studioDisplayEl.value = cells[2].textContent;
+          stashdbStudioEl.focus();
+        });
+      });
+      tableWrapEl.querySelectorAll(".btn-del").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const key = btn.closest("tr").dataset.key;
+          if (!confirm("Delete this alias?")) return;
+          try {
+            const r = await fetch("/api/studio_aliases", {
+              method: "DELETE",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ key }),
+            });
+            const data = await r.json();
+            if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+            await loadAliases();
+            setStatus("ok", "Deleted.");
+          } catch (err) {
+            setStatus("err", err.message || "Delete failed.");
+          }
+        });
+      });
+    }
+
+    saveBtn.addEventListener("click", async () => {
+      const stashdb_studio = stashdbStudioEl.value.trim();
+      const folder_name = folderNameEl.value.trim();
+      const studio_display = studioDisplayEl.value.trim();
+      if (!stashdb_studio || !folder_name) {
+        setStatus("err", "StashDB studio and GoFile folder are required.");
+        return;
+      }
+      saveBtn.disabled = true;
+      setStatus("", "Saving…");
+      try {
+        const r = await fetch("/api/studio_aliases", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ stashdb_studio, folder_name, studio_display }),
+        });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+        await loadAliases();
+        setStatus("ok", "Saved.");
+      } catch (err) {
+        setStatus("err", err.message || "Save failed.");
+      } finally {
+        saveBtn.disabled = false;
+      }
+    });
+
+    stashdbStudioEl.addEventListener("input", () => {
+      const s = stashdbStudioEl.value.trim();
+      const f = folderNameEl.value.trim();
+      if (s && f && !studioDisplayEl.value.trim()) {
+        studioDisplayEl.placeholder = `${s} / ${f}`;
+      }
+    });
+    folderNameEl.addEventListener("change", () => {
+      const s = stashdbStudioEl.value.trim();
+      const f = folderNameEl.value.trim();
+      if (s && f && !studioDisplayEl.value.trim()) {
+        studioDisplayEl.placeholder = `${s} / ${f}`;
+      }
+    });
+
+    (async function init() {
+      try {
+        await loadFolders();
+        await loadAliases();
+      } catch (err) {
+        setStatus("err", err.message || "Load failed.");
+      }
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,53 @@
+# syntax=docker/dockerfile:1
+# Multi-stage build:
+#   1) build Stash's official cmd/phasher (Go) — same code path as Stash's videophash.Generate
+#   2) runtime: alpine + ffmpeg/ffprobe + python3 HTTP wrapper + the phasher binary
+#
+# This service computes Stash-compatible fingerprints (OSHASH, MD5, PHASH) so callers
+# (e.g. gofup) can short-circuit duplicate detection against StashDB before falling back
+# to the slow PHASH step.
+
+ARG STASH_REF=v0.27.2
+# Override on flaky networks, e.g. GOPROXY=https://goproxy.io,direct
+ARG GOPROXY=https://proxy.golang.org,direct
+
+FROM golang:1.23-alpine AS builder
+ARG STASH_REF
+ARG GOPROXY
+ENV GOPROXY=${GOPROXY}
+RUN apk add --no-cache git ca-certificates build-base
+WORKDIR /src
+RUN git clone --depth 1 --branch "${STASH_REF}" https://github.com/stashapp/stash.git stash
+WORKDIR /src/stash
+COPY docker/phasher-patches/videophash-progress.patch /build/videophash-progress.patch
+RUN git apply /build/videophash-progress.patch
+# Stash's main module pulls in sqlite (CGO). cmd/phasher itself doesn't, but transitive imports
+# can; build with cgo on alpine using musl-dev/gcc from build-base.
+ENV CGO_ENABLED=1
+RUN mkdir -p /out
+# Cache modules + build cache; retry go mod download (proxy.golang.org often fails with unexpected EOF on weak links).
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    set -eux; \
+    for i in 1 2 3 4 5; do \
+      go mod download && break; \
+      if [ "$i" -eq 5 ]; then echo "go mod download failed after 5 attempts"; exit 1; fi; \
+      echo "go mod download failed (attempt $i), retrying in 20s..."; \
+      sleep 20; \
+    done; \
+    go build -trimpath -ldflags="-s -w" -o /out/phasher ./cmd/phasher; \
+    grep -aq 'STASH_PHASH_PROGRESS' /out/phasher \
+      || { echo 'FATAL: phasher binary missing STASH_PHASH_PROGRESS (videophash-progress.patch not applied?)'; exit 1; }
+
+FROM alpine:3.20
+RUN apk add --no-cache \
+    bash \
+    ca-certificates \
+    ffmpeg \
+    python3
+COPY --from=builder /out/phasher /usr/local/bin/phasher
+COPY py/hasher_http.py /usr/local/lib/hasher/hasher_http.py
+RUN chmod +x /usr/local/bin/phasher
+WORKDIR /work
+EXPOSE 8089
+ENTRYPOINT ["python3", "-u", "/usr/local/lib/hasher/hasher_http.py"]

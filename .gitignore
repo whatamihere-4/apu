@@ -1,0 +1,44 @@
+# ── Secrets / local config (never commit) ───────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── Runtime data (bind mounts, caches, uploads) ───────────────────
+downloads/
+thumbs/
+cache/
+
+# ffmpeg split temp dirs (created under downloads during Filester uploads)
+.split_*/
+
+# ── Python ────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# ── Logs & local artifacts ────────────────────────────────────────
+*.log
+*.bak
+app.py.bak
+
+# Suspicious local file — do not commit (review/delete on disk if unexpected)
+exp
+
+# ── OS / editor ───────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~

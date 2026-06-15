@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MD5 → StashDB — gofup</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #0e0e10;
+      --surface: #18181b;
+      --border: #2d2d33;
+      --accent: #6d5dfc;
+      --accent-hover: #8577fd;
+      --text: #e4e4e7;
+      --muted: #71717a;
+      --success: #22c55e;
+      --error: #ef4444;
+      --radius: 10px;
+    }
+    body {
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 2rem 1rem;
+    }
+    h1 { font-size: 1.75rem; font-weight: 700; margin-bottom: 0.25rem; }
+    .subtitle { color: var(--muted); font-size: 0.9rem; margin-bottom: 1.5rem; max-width: 640px; text-align: center; line-height: 1.45; }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.5rem;
+      width: 100%;
+      max-width: 640px;
+      margin-bottom: 1rem;
+    }
+    label { display: block; font-size: 0.8rem; color: var(--muted); margin-bottom: 0.35rem; text-transform: uppercase; letter-spacing: 0.04em; }
+    textarea {
+      width: 100%; padding: 0.65rem 0.85rem;
+      background: var(--bg); border: 1px solid var(--border);
+      border-radius: 6px; color: var(--text); font-size: 0.9rem;
+    }
+    textarea { min-height: 8rem; resize: vertical; font-family: ui-monospace, monospace; }
+    textarea:focus { outline: none; border-color: var(--accent); }
+    .btn {
+      margin-top: 1rem;
+      padding: 0.6rem 1.3rem; font-size: 0.85rem; font-weight: 600;
+      border: none; border-radius: 6px; cursor: pointer;
+      background: var(--accent); color: #fff;
+    }
+    .btn:hover { background: var(--accent-hover); }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn.secondary { background: var(--border); color: var(--text); }
+    .btn.secondary:hover { background: #3f3f46; }
+    #result {
+      margin-top: 1rem;
+      padding: 1rem;
+      border-radius: 8px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      font-size: 0.88rem;
+      line-height: 1.5;
+      display: none;
+    }
+    #result.visible { display: block; }
+    #result.ok { border-left: 3px solid var(--success); }
+    #result.err { border-left: 3px solid var(--error); }
+    .hash { font-family: ui-monospace, monospace; font-size: 0.95rem; word-break: break-all; }
+    .muted { color: var(--muted); font-size: 0.82rem; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .actions { margin-top: 0.85rem; display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
+    .dur-row { margin-top: 0.65rem; display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
+    .dur-row label { margin: 0; text-transform: none; letter-spacing: normal; font-size: 0.82rem; }
+    .md5-item { padding: 0.85rem 0; border-top: 1px solid var(--border); }
+    .md5-item:first-child { border-top: none; padding-top: 0; }
+    .md5-item-title { font-size: 0.78rem; color: var(--muted); margin-bottom: 0.5rem; word-break: break-all; }
+    .md5-batch-toolbar {
+      margin-bottom: 1rem;
+      padding-bottom: 1rem;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      align-items: center;
+    }
+    .md5-batch-toolbar .btn { margin-top: 0; }
+  </style>
+</head>
+<body>
+  <h1>MD5 → StashDB</h1>
+  <p class="subtitle">Paste <strong>one MD5 per line</strong> (32 hex chars; colons/spaces are stripped). Each row is looked up on StashDB. Batch submit only sends rows that <strong>already matched</strong> a scene (same as Remote OSHASH). Unmatched rows need a pasted scene URL + duration per row. Submits use <code>STASHDB_AUTO_CONTRIBUTE</code> + API key.</p>
+
+  <div class="card">
+    <label for="hashes">MD5 checksum(s)</label>
+    <textarea id="hashes" placeholder="21afc9a056f0d525a99a25597609aa4b&#10;d41d8cd98f00b204e9800998ecf8427e" autocomplete="off" spellcheck="false"></textarea>
+    <button type="button" class="btn" id="go-btn">Lookup on StashDB</button>
+  </div>
+
+  <div class="card">
+    <div id="result"></div>
+  </div>
+
+  <p class="muted"><a href="/oshash">Remote OSHASH</a> · <a href="/phash">Remote PHASH</a> · <a href="/remotehash">Remote hashes</a> · <a href="/">← Back to gofup</a></p>
+
+  <script>
+    const resultEl = document.getElementById('result');
+    const btn = document.getElementById('go-btn');
+
+    /** Per-row { md5, data } after latest run; null = error for that line */
+    let batchResults = [];
+
+    function showResult(html, ok) {
+      resultEl.innerHTML = html;
+      resultEl.className = 'visible ' + (ok ? 'ok' : 'err');
+    }
+
+    function sceneUrlWithFingerprintsHash(u) {
+      if (!u) return '';
+      const s = String(u);
+      const base = s.replace(/#.*$/, '');
+      return base + '#fingerprints';
+    }
+
+    function normalizeMd5Line(s) {
+      return String(s || '').replace(/[^a-fA-F0-9]/g, '').toLowerCase();
+    }
+
+    function parseMd5List(raw) {
+      return raw.split(/\r?\n/)
+        .map((s) => normalizeMd5Line(s))
+        .filter((s) => s.length > 0);
+    }
+
+    function durValFromData(data) {
+      if (data.duration_int != null && Number.isFinite(Number(data.duration_int))) {
+        return String(parseInt(String(data.duration_int), 10));
+      }
+      if (data.duration != null && Number.isFinite(Number(data.duration))) {
+        return String(Math.floor(Number(data.duration)));
+      }
+      return '';
+    }
+
+    function buildMd5ErrorBlock(md5, message, idx) {
+      return (
+        '<div class="md5-item"><div class="md5-item-title">#'
+        + (idx + 1) + ' — <span class="hash">' + escapeHtml(md5) + '</span></div>'
+        + '<div style="color:var(--error);">' + escapeHtml(message) + '</div></div>'
+      );
+    }
+
+    function buildMd5BlockHtml(md5, data, idx) {
+      const durVal = durValFromData(data);
+      const durAttr = durVal !== '' ? ' value="' + escapeHtml(durVal) + '"' : '';
+
+      let html = '<div class="md5-item">';
+      html += '<div class="md5-item-title">#' + (idx + 1) + ' — <span class="hash">' + escapeHtml(md5) + '</span></div>';
+      html += '<div><strong>MD5</strong></div>';
+      html += '<div class="hash">' + escapeHtml(data.hash) + '</div>';
+
+      if (data.stashdb_match) {
+        const m = data.stashdb_match;
+        html += '<div style="margin-top:0.75rem;"><strong>StashDB</strong> — match<br>';
+        html += escapeHtml(m.title || '') + '<br>';
+        if (m.link) {
+          const uFp = sceneUrlWithFingerprintsHash(m.link);
+          html += '<a href="' + escapeHtml(uFp) + '" target="_blank" rel="noopener">' + escapeHtml(uFp) + '</a>';
+        }
+        html += '</div>';
+
+        const sid = (m.id || '').trim();
+        const canSubmit = data.stashdb_can_submit && sid;
+        html += '<div class="dur-row">';
+        html += '<label for="dur-sec-' + idx + '">Duration (sec)</label>';
+        html += '<input type="number" id="dur-sec-' + idx + '" min="0" step="1" placeholder="required for submit"' + durAttr + '>';
+        html += '</div>';
+        html += '<div class="muted" style="margin-top:0.35rem;">'
+          + (durVal !== ''
+            ? 'Prefilled from StashDB fingerprint or scene duration when available.'
+            : 'Enter the clip length StashDB expects for submitFingerprint.')
+          + '</div>';
+        html += '<div class="actions">';
+        html += '<button type="button" class="btn" id="submit-sure-' + idx + '"' + (canSubmit ? '' : ' disabled') + '>Submit MD5 to matched scene</button>';
+        if (!canSubmit) {
+          html += '<span class="muted">Enable API key + STASHDB_AUTO_CONTRIBUTE.</span>';
+        }
+        html += '</div>';
+        html += '<div id="submit-msg-' + idx + '" class="muted" style="margin-top:0.5rem;"></div>';
+      } else {
+        if (data.stashdb_match === null && !data.stashdb_skipped && !data.stashdb_error) {
+          html += '<div class="muted" style="margin-top:0.75rem;">StashDB: no scene with this MD5.</div>';
+        }
+        const canSubmitMan = !!data.stashdb_can_submit;
+        html += '<hr style="margin:1rem 0;border:none;border-top:1px solid var(--border);">';
+        html += '<div><strong>Know the scene on StashDB?</strong></div>';
+        html += '<div class="muted" style="margin-top:0.35rem;">Paste the scene page URL to attach this MD5 as a fingerprint (e.g. GoFile file vs StashDB encode).</div>';
+        html += '<label for="manual-scene-url-' + idx + '" style="margin-top:0.65rem;">StashDB scene URL</label>';
+        html += '<input type="text" id="manual-scene-url-' + idx + '" placeholder="https://stashdb.org/scenes/…" autocomplete="off" style="width:100%;padding:0.55rem 0.65rem;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);">';
+        html += '<div class="dur-row" style="margin-top:0.65rem;">';
+        html += '<label for="dur-sec-manual-' + idx + '">Duration (sec)</label>';
+        html += '<input type="number" id="dur-sec-manual-' + idx + '" min="0" step="1" placeholder="required for submit"' + durAttr + '>';
+        html += '</div>';
+        html += '<div class="actions">';
+        html += '<button type="button" class="btn" id="submit-manual-' + idx + '"' + (canSubmitMan ? '' : ' disabled') + '>Submit MD5 to pasted scene</button>';
+        if (!canSubmitMan) {
+          html += '<span class="muted">Requires API key + STASHDB_AUTO_CONTRIBUTE.</span>';
+        }
+        html += '</div>';
+        html += '<div id="submit-manual-msg-' + idx + '" class="muted" style="margin-top:0.5rem;"></div>';
+
+        if (data.stashdb_match === null && !data.stashdb_skipped && !data.stashdb_error) {
+          let draftHref = '/stashdb-scene-draft?remote_md5=1'
+            + '&md5=' + encodeURIComponent(data.hash);
+          if (durVal !== '') {
+            draftHref += '&duration_int=' + encodeURIComponent(durVal);
+          }
+          html += '<div class="actions" style="margin-top:0.85rem;"><a class="btn secondary" href="' + escapeHtml(draftHref) + '" style="display:inline-block;margin-top:0;text-decoration:none;">Create StashDB draft…</a></div>';
+          html += '<div class="muted" style="margin-top:0.45rem;">Opens draft tool with this MD5 prefilled (placeholder filename — adjust if you use local file flow).</div>';
+        }
+      }
+      if (data.stashdb_skipped) {
+        html += '<div class="muted" style="margin-top:0.75rem;">StashDB: ' + escapeHtml(data.stashdb_skipped) + '</div>';
+      }
+      if (data.stashdb_error) {
+        html += '<div class="muted" style="margin-top:0.75rem;">StashDB lookup failed: ' + escapeHtml(data.stashdb_error) + '</div>';
+      }
+      html += '</div>';
+      return html;
+    }
+
+    function sureMatchSubmitIndices() {
+      const out = [];
+      for (let idx = 0; idx < batchResults.length; idx++) {
+        const br = batchResults[idx];
+        if (!br || !br.data || !br.data.stashdb_match) continue;
+        const sid = (br.data.stashdb_match.id || '').trim();
+        if (br.data.stashdb_can_submit && sid) out.push(idx);
+      }
+      return out;
+    }
+
+    function buildSubmitAllToolbar(count) {
+      if (count < 1) return '';
+      return (
+        '<div class="md5-batch-toolbar">'
+        + '<button type="button" class="btn" id="submit-all-sure-btn">Submit all StashDB matches'
+        + ' <span class="muted">(' + count + ')</span></button>'
+        + '<span id="submit-all-msg" class="muted"></span>'
+        + '</div>'
+      );
+    }
+
+    function wireBatchListeners() {
+      for (let idx = 0; idx < batchResults.length; idx++) {
+        const br = batchResults[idx];
+        if (!br || !br.data) continue;
+        const sure = document.getElementById('submit-sure-' + idx);
+        if (sure && br.data.stashdb_match) {
+          sure.addEventListener('click', () => onSubmitSureIdx(idx));
+        }
+        const manual = document.getElementById('submit-manual-' + idx);
+        if (manual && !br.data.stashdb_match) {
+          manual.addEventListener('click', () => onSubmitManualIdx(idx));
+        }
+      }
+      const submitAllBtn = document.getElementById('submit-all-sure-btn');
+      if (submitAllBtn) {
+        submitAllBtn.addEventListener('click', onSubmitAllSureMatches);
+      }
+      requestAnimationFrame(() => {
+        for (let idx = 0; idx < batchResults.length; idx++) {
+          const br = batchResults[idx];
+          if (!br || !br.data) continue;
+          const dv = durValFromData(br.data);
+          if (!dv) continue;
+          ['dur-sec-' + idx, 'dur-sec-manual-' + idx].forEach((id) => {
+            const el = document.getElementById(id);
+            if (el) el.value = dv;
+          });
+        }
+      });
+    }
+
+    document.getElementById('go-btn').addEventListener('click', async () => {
+      const lines = parseMd5List(document.getElementById('hashes').value);
+      batchResults = [];
+      if (lines.length === 0) {
+        showResult('Enter at least one MD5 (32 hex characters per line).', false);
+        return;
+      }
+      const bad = lines.filter((h) => h.length !== 32);
+      if (bad.length) {
+        showResult('Each line must be exactly 32 hex characters after stripping separators. Problem: <span class="hash">' + escapeHtml(bad[0]) + '</span>', false);
+        return;
+      }
+      btn.disabled = true;
+      resultEl.className = 'visible';
+      resultEl.style.borderLeftColor = 'var(--border)';
+      resultEl.style.display = 'block';
+      const parts = [];
+      try {
+        for (let i = 0; i < lines.length; i++) {
+          resultEl.innerHTML =
+            '<div class="muted" style="margin-bottom:0.75rem;">Processing ' + (i + 1) + ' / ' + lines.length + '…</div>'
+            + parts.join('');
+          try {
+            const r = await fetch('/api/md5_stashdb_lookup', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ md5: lines[i] }),
+            });
+            const data = await r.json();
+            if (!r.ok || !data.ok) {
+              parts.push(buildMd5ErrorBlock(lines[i], data.error || data.detail || ('HTTP ' + r.status), i));
+              batchResults[i] = null;
+              continue;
+            }
+            batchResults[i] = { md5: lines[i], data };
+            parts.push(buildMd5BlockHtml(lines[i], data, i));
+          } catch (e) {
+            parts.push(buildMd5ErrorBlock(lines[i], String(e.message || e), i));
+            batchResults[i] = null;
+          }
+        }
+        const sureN = sureMatchSubmitIndices().length;
+        resultEl.innerHTML = buildSubmitAllToolbar(sureN) + parts.join('');
+        const anyOk = batchResults.some((x) => x && x.data);
+        resultEl.className = 'visible ' + (anyOk ? 'ok' : 'err');
+        wireBatchListeners();
+      } catch (e) {
+        showResult('<strong>Request failed</strong><br>' + escapeHtml(String(e.message || e)), false);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    async function postMd5FingerprintsToScene(sceneId, durationSec, hashHex) {
+      const r = await fetch('/api/stashdb_submit_scene_fingerprints', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          scene_id: sceneId,
+          duration: durationSec,
+          fingerprints: [{ algorithm: 'MD5', hash: hashHex }],
+        }),
+      });
+      const out = await r.json();
+      if (!r.ok || out.error) {
+        return { ok: false, text: out.error || ('HTTP ' + r.status) };
+      }
+      const rows = (out.results || []).map((x) =>
+        x.algorithm + ': ' + (x.ok ? 'ok' : ('failed' + (x.error ? ' — ' + x.error : '')))
+      ).join('; ');
+      return { ok: true, text: rows || 'Done.' };
+    }
+
+    async function onSubmitAllSureMatches() {
+      const indices = sureMatchSubmitIndices();
+      if (indices.length === 0) return;
+      const batchBtn = document.getElementById('submit-all-sure-btn');
+      const batchMsg = document.getElementById('submit-all-msg');
+      if (batchBtn) batchBtn.disabled = true;
+      if (batchMsg) batchMsg.textContent = '';
+      try {
+        for (let j = 0; j < indices.length; j++) {
+          const idx = indices[j];
+          const br = batchResults[idx];
+          const durEl = document.getElementById('dur-sec-' + idx);
+          const msgEl = document.getElementById('submit-msg-' + idx);
+          const submitBtn = document.getElementById('submit-sure-' + idx);
+          if (!br || !br.data || !br.data.stashdb_match) continue;
+          const sid = (br.data.stashdb_match.id || '').trim();
+          const durRaw = durEl ? durEl.value.trim() : '';
+          const dur = parseInt(durRaw, 10);
+          if (!Number.isFinite(dur) || dur < 0) {
+            if (msgEl) msgEl.textContent = 'Skipped — enter a valid duration (seconds).';
+            continue;
+          }
+          if (submitBtn) submitBtn.disabled = true;
+          if (msgEl) msgEl.textContent = 'Submitting… (' + (j + 1) + ' / ' + indices.length + ')';
+          const res = await postMd5FingerprintsToScene(sid, dur, br.data.hash);
+          if (msgEl) msgEl.textContent = res.text;
+          if (submitBtn) submitBtn.disabled = false;
+        }
+        if (batchMsg) batchMsg.textContent = 'Finished.';
+      } catch (e) {
+        if (batchMsg) batchMsg.textContent = String(e.message || e);
+      } finally {
+        if (batchBtn) batchBtn.disabled = false;
+      }
+    }
+
+    async function onSubmitSureIdx(idx) {
+      const br = batchResults[idx];
+      const msg = document.getElementById('submit-msg-' + idx);
+      const durEl = document.getElementById('dur-sec-' + idx);
+      const submitBtn = document.getElementById('submit-sure-' + idx);
+      if (!br || !br.data || !br.data.stashdb_match) return;
+      const sid = (br.data.stashdb_match.id || '').trim();
+      await submitMd5ToScene(sid, durEl, msg, submitBtn, br.data.hash);
+    }
+
+    async function onSubmitManualIdx(idx) {
+      const br = batchResults[idx];
+      const msg = document.getElementById('submit-manual-msg-' + idx);
+      const durEl = document.getElementById('dur-sec-manual-' + idx);
+      const submitBtn = document.getElementById('submit-manual-' + idx);
+      const raw = (document.getElementById('manual-scene-url-' + idx) || {}).value || '';
+      const sid = extractStashdbSceneId(raw);
+      if (!sid) {
+        if (msg) msg.textContent = 'Paste a StashDB scene URL (must contain a scene UUID).';
+        return;
+      }
+      if (!br || !br.data || !br.data.hash) return;
+      await submitMd5ToScene(sid, durEl, msg, submitBtn, br.data.hash);
+    }
+
+    async function submitMd5ToScene(sceneId, durEl, msgEl, submitBtn, hashHex) {
+      const durRaw = durEl ? durEl.value.trim() : '';
+      const dur = parseInt(durRaw, 10);
+      if (!Number.isFinite(dur) || dur < 0) {
+        if (msgEl) msgEl.textContent = 'Enter a valid duration (seconds).';
+        return;
+      }
+      if (submitBtn) submitBtn.disabled = true;
+      if (msgEl) msgEl.textContent = 'Submitting…';
+      try {
+        const res = await postMd5FingerprintsToScene(sceneId, dur, hashHex);
+        if (msgEl) msgEl.textContent = res.text;
+      } catch (e) {
+        if (msgEl) msgEl.textContent = String(e.message || e);
+      } finally {
+        if (submitBtn) submitBtn.disabled = false;
+      }
+    }
+
+    function extractStashdbSceneId(text) {
+      const m = String(text || '').match(
+        /\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b/
+      );
+      return m ? m[0] : null;
+    }
+
+    function escapeHtml(s) {
+      const d = document.createElement('div');
+      d.textContent = s;
+      return d.innerHTML;
+    }
+  </script>
+</body>
+</html>

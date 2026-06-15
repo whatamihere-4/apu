@@ -1,0 +1,1509 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BBCode Generator</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    :root {
+      --bg: #0e0e10;
+      --surface: #18181b;
+      --border: #2d2d33;
+      --accent: #6d5dfc;
+      --accent-hover: #8577fd;
+      --text: #e4e4e7;
+      --muted: #71717a;
+      --success: #22c55e;
+      --error: #ef4444;
+      --warn: #f59e0b;
+      --radius: 10px;
+    }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      padding: 2rem 1rem;
+      display: flex;
+      justify-content: center;
+    }
+    .page { width: 100%; max-width: 1100px; }
+    h1 { margin: 0 0 0.3rem; font-size: 1.8rem; letter-spacing: -0.02em; }
+    .subtitle { margin: 0 0 1.4rem; color: var(--muted); font-size: 0.92rem; }
+    .layout {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+      align-items: start;
+    }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1rem;
+    }
+    .card h2 { margin: 0 0 0.9rem; font-size: 1rem; font-weight: 600; }
+    .card h3 { margin: 1.2rem 0 0.5rem; font-size: 0.82rem; font-weight: 600;
+               text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
+    .field { margin-bottom: 0.8rem; }
+    .row { display: flex; gap: 0.5rem; align-items: end; }
+    .row .field { flex: 1; margin-bottom: 0; }
+    label {
+      display: block;
+      margin-bottom: 0.35rem;
+      font-size: 0.78rem;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    input[type="text"], input[type="url"], textarea {
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 0.9rem;
+      padding: 0.62rem 0.75rem;
+      outline: none;
+      font-family: inherit;
+    }
+    textarea { resize: vertical; min-height: 86px; line-height: 1.35; }
+    input:focus, textarea:focus { border-color: var(--accent); }
+    .actress-header {
+      display: flex; justify-content: space-between; align-items: center;
+      margin-bottom: 0.45rem;
+    }
+    .actress-title {
+      font-size: 0.78rem; letter-spacing: 0.04em; text-transform: uppercase;
+      color: var(--muted);
+    }
+    .btn-icon {
+      border: 1px solid var(--border); background: var(--bg); color: var(--text);
+      width: 28px; height: 28px; border-radius: 6px; cursor: pointer;
+      font-size: 1rem; line-height: 1;
+    }
+    .btn-icon:hover { border-color: var(--accent); }
+    .actress-list {
+      display: flex; flex-direction: column; gap: 0.55rem; margin-bottom: 0.85rem;
+    }
+    .actress-row {
+      display: grid;
+      grid-template-columns: minmax(120px, 1fr) minmax(160px, 1.4fr) auto auto;
+      gap: 0.45rem;
+      align-items: center;
+    }
+    .actress-row .remove-btn {
+      border-color: rgba(239, 68, 68, 0.45);
+      color: #fecaca;
+    }
+    .actress-row .remove-btn:hover {
+      border-color: var(--error); color: #fff; background: rgba(239, 68, 68, 0.2);
+    }
+    .actress-row .simp-btn {
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--text);
+      padding: 0 0.55rem;
+      height: 28px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.78rem;
+      white-space: nowrap;
+    }
+    .actress-row .simp-btn:hover { border-color: var(--accent); }
+    .output-wrap { display: flex; flex-direction: column; gap: 0.6rem; }
+    #bbcode-output {
+      min-height: 360px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      white-space: pre;
+    }
+    .output-tools { display: flex; align-items: center; gap: 0.55rem; flex-wrap: wrap; }
+    .btn {
+      border: none; border-radius: 6px;
+      padding: 0.52rem 0.9rem;
+      font-size: 0.84rem; font-weight: 600;
+      background: var(--accent); color: #fff; cursor: pointer;
+    }
+    .btn:hover { background: var(--accent-hover); }
+    .btn.secondary {
+      background: transparent; color: var(--text); border: 1px solid var(--border);
+    }
+    .btn.secondary:hover { border-color: var(--accent); }
+    #copy-status, #helper-status {
+      font-size: 0.8rem; color: var(--muted); min-height: 1.1em;
+    }
+    #copy-status.ok, #helper-status.ok { color: var(--success); }
+    #copy-status.err, #helper-status.err { color: var(--error); }
+    .scene-meta {
+      display: flex; flex-direction: column; gap: 0.3rem;
+      font-size: 0.86rem; color: var(--muted);
+      margin-bottom: 0.8rem;
+    }
+    .scene-meta a { color: var(--accent); text-decoration: none; word-break: break-all; }
+    .scene-meta a:hover { text-decoration: underline; }
+    .image-card {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.6rem;
+      background: var(--bg);
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      margin-bottom: 0.8rem;
+    }
+    .image-card img {
+      max-width: 100%;
+      max-height: 320px;
+      border-radius: 6px;
+      object-fit: contain;
+      background: #000;
+    }
+    .image-tools {
+      display: flex; gap: 0.4rem; flex-wrap: wrap;
+    }
+    .image-meta {
+      font-size: 0.78rem;
+      color: var(--muted);
+    }
+    .thumb-sheet-card img {
+      max-width: 100%;
+      max-height: 480px;
+      border-radius: 6px;
+      object-fit: contain;
+      background: #000;
+    }
+    .thumb-sheet-missing {
+      font-size: 0.82rem;
+      color: var(--warn);
+      line-height: 1.35;
+    }
+    .btn:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+    select {
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 0.9rem;
+      padding: 0.62rem 0.75rem;
+      outline: none;
+      font-family: inherit;
+    }
+    select:focus { border-color: var(--accent); }
+    .file-list .file-item {
+      display: flex;
+      justify-content: space-between;
+      gap: 0.5rem;
+      padding: 0.45rem 0.65rem;
+      cursor: pointer;
+      font-size: 0.85rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .file-list .file-item:last-child { border-bottom: none; }
+    .file-list .file-item:hover { background: rgba(109, 93, 252, 0.12); }
+    .file-list .file-item.selected {
+      background: rgba(109, 93, 252, 0.22);
+      outline: 1px solid var(--accent);
+    }
+    .file-list .file-item .sz { color: var(--muted); font-size: 0.78rem; white-space: nowrap; }
+  #stashdb-status {
+      font-size: 0.8rem;
+      color: var(--muted);
+      margin-top: 0.35rem;
+      min-height: 1.1em;
+    }
+    #stashdb-status.ok { color: var(--success); }
+    #stashdb-status.err { color: var(--error); }
+    @media (max-width: 940px) {
+      .layout { grid-template-columns: 1fr; }
+      #bbcode-output { min-height: 280px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <h1>BBCode Generator</h1>
+    <p class="subtitle">
+      Pick a cached download for thumbnails and resolution, autofill from StashDB (scene, edit, or draft), then copy BBCode.
+      <a href="/aliases" style="color:var(--accent);">Studio aliases</a>
+      <span id="filename-pill"></span>
+    </p>
+
+    <div class="layout">
+      <section class="card">
+        <h2>Source</h2>
+        <div class="field">
+          <label for="cached-file-select">Cached file (scenes.json)</label>
+          <div class="row">
+            <select id="cached-file-select">
+              <option value="">— none —</option>
+            </select>
+            <button type="button" class="btn secondary" id="cached-file-refresh" title="Reload list from scenes.json">Refresh</button>
+            <button type="button" class="btn secondary" id="cached-file-browse">Browse</button>
+          </div>
+          <div class="file-list" id="downloads-file-list" style="display:none;"></div>
+          <p id="cached-file-hint" style="margin:0.35rem 0 0;font-size:0.8rem;color:var(--muted);"></p>
+        </div>
+
+        <div class="field">
+          <label for="stashdb-link">StashDB scene, edit, or draft</label>
+          <div class="row">
+            <div class="field">
+              <input type="url" id="stashdb-link" placeholder="https://stashdb.org/scenes/… or …/edits/…">
+            </div>
+            <button type="button" class="btn" id="stashdb-autofill-btn">Autofill</button>
+          </div>
+          <div id="stashdb-status"></div>
+        </div>
+
+        <h2 style="margin-top:1rem;">Scene assets</h2>
+        <div class="scene-meta" id="scene-meta">Select a cached file with a StashDB match, or autofill from a link.</div>
+
+        <div class="image-card" id="image-card" hidden>
+          <img id="scene-image" alt="Scene cover" />
+          <div class="image-meta" id="image-meta"></div>
+          <div class="image-tools">
+            <a class="btn secondary" id="open-original" target="_blank" rel="noopener">Open original</a>
+            <a class="btn" id="download-png">Download PNG</a>
+            <button class="btn secondary" type="button" id="image-next">Next image</button>
+            <button class="btn" type="button" id="download-both-png" disabled title="StashDB cover PNG + thumbnail sheet">Download both PNGs</button>
+          </div>
+        </div>
+
+        <div class="image-card thumb-sheet-card" id="thumb-sheet-card" hidden>
+          <h3 style="margin:0 0 0.5rem; font-size:0.82rem; font-weight:600; text-transform:uppercase; letter-spacing:0.05em; color:var(--muted);">Thumbnail sheet (thumber)</h3>
+          <img id="thumb-sheet-img" alt="Generated thumbnail grid" hidden />
+          <p class="thumb-sheet-missing" id="thumb-sheet-missing" hidden></p>
+          <div class="image-tools">
+            <a class="btn secondary" id="download-thumb-png" href="about:blank" style="visibility:hidden;">Download sheet PNG</a>
+          </div>
+        </div>
+
+        <div class="actress-header">
+          <div class="actress-title">Performers (males filtered out)</div>
+          <button type="button" class="btn-icon" id="add-actress-btn" title="Add actress">+</button>
+        </div>
+        <div class="actress-list" id="actress-list"></div>
+
+        <div class="field">
+          <label for="title">Title</label>
+          <input type="text" id="title">
+        </div>
+
+        <div class="field">
+          <label for="image-bbcode">Image Embed BBCode (two images)</label>
+          <textarea id="image-bbcode" placeholder="[IMG]...[/IMG]&#10;[IMG]...[/IMG]"></textarea>
+          <div class="image-tools" style="margin-top:0.5rem;">
+            <button
+              type="button"
+              class="btn secondary"
+              data-chevereto-pup-trigger
+              data-target="#image-bbcode"
+              title="Open JPG6 uploader and insert BBCode into the Image Embed field"
+            >
+              Upload images (JPG6 plugin)
+            </button>
+            <a
+              id="jpg6-open-upload"
+              class="btn secondary"
+              href="https://jpg6.su/upload"
+              target="_blank"
+              rel="noopener"
+              title="Fallback: open JPG6 upload page directly"
+            >
+              Open JPG6 upload
+            </a>
+          </div>
+          <div class="jpg6-album-row" style="margin-top:0.4rem;">
+            <label for="jpg6-to-album">Default JPG6 album (optional)</label>
+            <input
+              type="text"
+              id="jpg6-to-album"
+              placeholder="Album URL or id (e.g. jpg6.su/a/…)"
+              autocomplete="off"
+              spellcheck="false"
+              {% if jpg6_to_album %}readonly{% endif %}
+              value="{{ jpg6_to_album|e }}"
+            >
+            <div class="image-tools" style="margin-top:0.4rem;">
+              <button type="button" class="btn secondary" id="jpg6-to-album-apply" {% if jpg6_to_album %}disabled{% endif %}>Save album &amp; reload</button>
+            </div>
+            <p style="margin:0.35rem 0 0;font-size:12px;opacity:0.85;">
+              {% if jpg6_to_album %}
+              Set by server env <code>JPG6_TO_ALBUM</code> (applies to everyone using this app). Chevereto 3 expects the encoded id in <code>?toAlbum=</code> (for URLs like <code>/a/user.ajDeMe</code>, that's the part after the dot); log in as the album owner.
+              {% else %}
+              Stored in this browser only. The upload URL uses <code>?toAlbum=</code> with the encoded album id (after the dot in <code>/a/user.encodedId</code> if applicable).
+              {% endif %}
+            </p>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="resolution">Resolution</label>
+          <input type="text" id="resolution" placeholder="User defined resolution">
+        </div>
+
+        <div class="field">
+          <label for="upload-date">Upload Date</label>
+          <input type="text" id="upload-date">
+        </div>
+
+        <div class="field">
+          <label for="studio">Studio</label>
+          <input type="text" id="studio">
+        </div>
+
+        <div class="field" style="margin-bottom:0;">
+          <label for="gallery-link">Gallery Link</label>
+          <input type="url" id="gallery-link" placeholder="User defined gallery link">
+        </div>
+
+        <div id="helper-status"></div>
+      </section>
+
+      <section class="card output-wrap">
+        <h2>Generated BBCode</h2>
+        <textarea id="bbcode-output" readonly></textarea>
+        <div class="output-tools">
+          <button type="button" class="btn" id="copy-btn">Copy to Clipboard</button>
+          <span id="copy-status"></span>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <script>
+    const PAGE_DATA = {
+      sceneId: {{ scene_id|tojson }},
+      filename: {{ filename|tojson }},
+      gallery: {{ gallery|tojson }},
+      stashdbScenesBase: {{ stashdb_scenes_base|tojson }},
+    };
+    let activeFilename = (PAGE_DATA.filename || "").trim();
+    let activeSceneId = (PAGE_DATA.sceneId || "").trim();
+    const cachedFileByName = new Map();
+
+    const actressListEl = document.getElementById("actress-list");
+    const addActressBtn = document.getElementById("add-actress-btn");
+    const outputEl = document.getElementById("bbcode-output");
+    const copyBtn = document.getElementById("copy-btn");
+    const copyStatusEl = document.getElementById("copy-status");
+    const helperStatusEl = document.getElementById("helper-status");
+    const sceneMetaEl = document.getElementById("scene-meta");
+    const stashdbLinkEl = document.getElementById("stashdb-link");
+    const filenamePillEl = document.getElementById("filename-pill");
+    const imageCardEl = document.getElementById("image-card");
+    const sceneImageEl = document.getElementById("scene-image");
+    const imageMetaEl = document.getElementById("image-meta");
+    const openOriginalEl = document.getElementById("open-original");
+    const downloadPngEl = document.getElementById("download-png");
+    const imageNextBtn = document.getElementById("image-next");
+    const downloadBothBtn = document.getElementById("download-both-png");
+    const thumbSheetCardEl = document.getElementById("thumb-sheet-card");
+    const thumbSheetImgEl = document.getElementById("thumb-sheet-img");
+    const thumbSheetMissingEl = document.getElementById("thumb-sheet-missing");
+    const downloadThumbPngEl = document.getElementById("download-thumb-png");
+    const cachedFileSelectEl = document.getElementById("cached-file-select");
+    const cachedFileRefreshBtn = document.getElementById("cached-file-refresh");
+    const cachedFileBrowseBtn = document.getElementById("cached-file-browse");
+    const downloadsFileListEl = document.getElementById("downloads-file-list");
+    const cachedFileHintEl = document.getElementById("cached-file-hint");
+    const stashdbAutofillBtn = document.getElementById("stashdb-autofill-btn");
+    const stashdbStatusEl = document.getElementById("stashdb-status");
+
+    const fieldIds = ["title", "resolution", "upload-date", "studio", "gallery-link"];
+    const fields = Object.fromEntries(
+      [...fieldIds, "image-bbcode"].map((id) => [id, document.getElementById(id)])
+    );
+
+    let sceneImages = [];
+    let imageIndex = 0;
+    /** True after /api/thumb_sheet loads in the preview <img>. */
+    let thumbSheetAvailable = false;
+    /** SexLikeReal /scenes/… numeric id for CDN preview GIF (set when StashDB lists an SLR URL). */
+    let slrPreviewCode = null;
+
+    function updateFilenamePill() {
+      filenamePillEl.textContent = activeFilename ? " (" + activeFilename + ")" : "";
+    }
+    updateFilenamePill();
+
+    function syncUrlParams() {
+      const p = new URLSearchParams(window.location.search);
+      if (activeFilename) p.set("filename", activeFilename);
+      else p.delete("filename");
+      if (activeSceneId) p.set("scene_id", activeSceneId);
+      else p.delete("scene_id");
+      const qs = p.toString();
+      const next = window.location.pathname + (qs ? "?" + qs : "");
+      window.history.replaceState(null, "", next);
+    }
+
+    function setActiveFilename(name, opts = {}) {
+      activeFilename = (name || "").trim();
+      if (cachedFileSelectEl) cachedFileSelectEl.value = activeFilename;
+      updateFilenamePill();
+      setupThumbSheet();
+      if (opts.syncUrl !== false) syncUrlParams();
+    }
+
+    function setActiveSceneId(id, opts = {}) {
+      activeSceneId = (id || "").trim();
+      if (opts.syncUrl !== false) syncUrlParams();
+    }
+
+    function escAttr(value) {
+      return String(value || "").replace(/&/g, "&amp;").replace(/"/g, "&quot;");
+    }
+
+    function escHtml(value) {
+      const d = document.createElement("div");
+      d.textContent = value || "";
+      return d.innerHTML;
+    }
+
+    /** Image BBCode: single line (no whitespace). JPG6 medium embed uses `.md.gif` preview URLs; strip `md` so GIFs animate. */
+    function sanitizeImageBbcodeInput(text) {
+      return String(text || "")
+        .replace(/\s/g, "")
+        .replace(/\.md\.gif/gi, ".gif");
+    }
+
+    function addActressRow(name = "", link = "") {
+      const row = document.createElement("div");
+      row.className = "actress-row";
+      row.innerHTML = `
+        <input type="text" class="actress-name" placeholder="Actress name" value="${escAttr(name)}">
+        <input type="url" class="actress-link" placeholder="Link to actress" value="${escAttr(link)}">
+        <button type="button" class="simp-btn" title="Open SimpCity search in a new tab">SimpCity</button>
+        <button type="button" class="btn-icon remove-btn" title="Remove actress">x</button>
+      `;
+      const removeBtn = row.querySelector(".remove-btn");
+      removeBtn.addEventListener("click", () => {
+        row.remove();
+        updateActressRowState();
+        composeBbcode();
+      });
+      const simpBtn = row.querySelector(".simp-btn");
+      simpBtn.addEventListener("click", () => {
+        const n = row.querySelector(".actress-name").value.trim();
+        if (!n) return;
+        const url = "https://simpcity.cr/search/?q=" + encodeURIComponent(n);
+        window.open(url, "_blank", "noopener");
+      });
+      row.querySelector(".actress-name").addEventListener("input", composeBbcode);
+      row.querySelector(".actress-link").addEventListener("input", composeBbcode);
+      actressListEl.appendChild(row);
+      updateActressRowState();
+      composeBbcode();
+    }
+
+    function updateActressRowState() {
+      const rows = actressListEl.querySelectorAll(".actress-row");
+      rows.forEach((row, index) => {
+        const removeBtn = row.querySelector(".remove-btn");
+        removeBtn.style.display = index === 0 ? "none" : "inline-flex";
+      });
+    }
+
+    function actressHeadingPart() {
+      const rows = Array.from(actressListEl.querySelectorAll(".actress-row"));
+      const parts = rows
+        .map((row) => {
+          const name = row.querySelector(".actress-name").value.trim();
+          const link = row.querySelector(".actress-link").value.trim();
+          if (!name && !link) return "";
+          if (name && !link) return name;
+          if (!name) return "";
+          return `[URL='${link}']${name}[/URL]`;
+        })
+        .filter(Boolean);
+      return parts.join(", ");
+    }
+
+    function clearActressRows() {
+      actressListEl.innerHTML = "";
+    }
+
+    function setPerformers(performers) {
+      clearActressRows();
+      const list = Array.isArray(performers) ? performers : [];
+      if (list.length === 0) {
+        addActressRow();
+        return;
+      }
+      list.forEach((p) => {
+        const name = String(p.name || "").trim();
+        if (name) addActressRow(name, "");
+      });
+      updateActressRowState();
+    }
+
+    function getPerformerRows() {
+      return Array.from(actressListEl.querySelectorAll(".actress-row")).map((row) => ({
+        name: row.querySelector(".actress-name").value.trim(),
+        link: row.querySelector(".actress-link").value.trim(),
+      }));
+    }
+
+    async function applySavedPerformerLinks() {
+      const rows = getPerformerRows();
+      const names = rows.map((r) => r.name).filter(Boolean);
+      if (!names.length) return;
+      try {
+        const r = await fetch("/api/performer_links_lookup", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ names }),
+        });
+        const data = await r.json();
+        if (!r.ok || !data || data.error) return;
+        const links = data.links || {};
+        Array.from(actressListEl.querySelectorAll(".actress-row")).forEach((row) => {
+          const nameEl = row.querySelector(".actress-name");
+          const linkEl = row.querySelector(".actress-link");
+          const nm = nameEl.value.trim();
+          if (!nm || linkEl.value.trim()) return;
+          const hit = links[nm];
+          if (hit) linkEl.value = hit;
+        });
+        composeBbcode();
+      } catch (_err) { /* optional */ }
+    }
+
+    async function savePerformerLinksIfAny() {
+      const rows = getPerformerRows().filter((r) => r.name && r.link);
+      if (!rows.length) return;
+      try {
+        await fetch("/api/performer_links_save", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ rows }),
+        });
+      } catch (_err) { /* optional */ }
+    }
+
+    /** Built-in VR / panorama widths×heights → marketing label. */
+    const RESOLUTION_PRESETS = [
+      [3840, 1920, "4K"],
+      [4096, 2048, "4K"],
+      [4096, 2160, "4K"],
+      [5400, 2700, "5K"],
+      [5244, 2622, "5K"],
+      [5760, 2880, "5K"],
+      [6144, 3072, "6K"],
+      [5800, 2900, "6K"],
+      [7200, 3600, "7K"],
+      [7168, 3584, "7K"],
+      [7260, 3630, "7K"],
+      [8192, 4096, "8K"],
+      [8000, 4000, "8K"],
+      [7680, 3840, "8K"],
+    ];
+    /** Learned from copy corrections — loaded from cache/resolution_presets.json. */
+    const learnedResolutionByKey = new Map();
+    /** Last auto-filled resolution (for learning on copy). */
+    let lastAutoResolution = null;
+
+    function resolutionKey(w, h) {
+      return `${Number(w)}x${Number(h)}`;
+    }
+
+    function mergeLearnedPresets(presets) {
+      learnedResolutionByKey.clear();
+      for (const row of presets || []) {
+        const w = row.width;
+        const h = row.height;
+        const label = (row.label || "").trim();
+        if (!w || !h || !label) continue;
+        learnedResolutionByKey.set(resolutionKey(w, h), label);
+      }
+    }
+
+    async function loadLearnedResolutionPresets() {
+      try {
+        const r = await fetch("/api/resolution_presets");
+        const data = await r.json();
+        if (r.ok && data.presets) mergeLearnedPresets(data.presets);
+      } catch (_err) { /* optional */ }
+    }
+
+    function parseResolutionField(text) {
+      const raw = String(text || "").trim();
+      if (!raw) return { raw, label: "", w: null, h: null };
+      const m = /\((\d+)x(\d+)\)\s*$/i.exec(raw);
+      if (m) {
+        return {
+          raw,
+          label: raw.slice(0, m.index).trim(),
+          w: parseInt(m[1], 10),
+          h: parseInt(m[2], 10),
+        };
+      }
+      const plain = /^(\d+)x(\d+)$/i.exec(raw);
+      if (plain) {
+        return {
+          raw,
+          label: "",
+          w: parseInt(plain[1], 10),
+          h: parseInt(plain[2], 10),
+        };
+      }
+      return { raw, label: raw, w: null, h: null };
+    }
+
+    function normalizeResolutionLabel(label) {
+      const s = String(label || "").trim().replace(/\?$/, "");
+      const m = /^(\d+)K$/i.exec(s);
+      return m ? `${parseInt(m[1], 10)}K` : "";
+    }
+
+    function formatResolutionLabel(w, h) {
+      const wi = Number(w);
+      const hi = Number(h);
+      if (!wi || !hi || wi < 1 || hi < 1) return "";
+      const learned = learnedResolutionByKey.get(resolutionKey(wi, hi));
+      if (learned) return `${learned} (${wi}x${hi})`;
+      for (const [pw, ph, label] of RESOLUTION_PRESETS) {
+        if (wi === pw && hi === ph) {
+          return `${label} (${wi}x${hi})`;
+        }
+      }
+      const first = String(Math.floor(wi))[0];
+      return `${first}K? (${wi}x${hi})`;
+    }
+
+    function setAutoResolution(w, h) {
+      const value = formatResolutionLabel(w, h);
+      fields["resolution"].value = value;
+      lastAutoResolution = { w: Number(w), h: Number(h), value };
+    }
+
+    async function learnResolutionIfCorrected() {
+      const current = fields["resolution"].value.trim();
+      if (!current || !lastAutoResolution) return null;
+      const parsed = parseResolutionField(current);
+      const w = parsed.w || lastAutoResolution.w;
+      const h = parsed.h || lastAutoResolution.h;
+      if (!w || !h) return null;
+      if (w !== lastAutoResolution.w || h !== lastAutoResolution.h) return null;
+      if (current === lastAutoResolution.value) return null;
+      if (!lastAutoResolution.value.includes("?")) return null;
+      const label = normalizeResolutionLabel(parsed.label);
+      if (!label) return null;
+      const r = await fetch("/api/resolution_presets/learn", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ width: w, height: h, label }),
+      });
+      const data = await r.json();
+      if (!r.ok || data.error) throw new Error(data.error || `HTTP ${r.status}`);
+      learnedResolutionByKey.set(resolutionKey(w, h), label);
+      const display = data.display || `${label} (${w}x${h})`;
+      if (!/\(\d+x\d+\)/i.test(current)) {
+        fields["resolution"].value = display;
+      }
+      lastAutoResolution = { w, h, value: fields["resolution"].value.trim() };
+      return data;
+    }
+
+    function parseVideoDimsFromQuery() {
+      const p = new URLSearchParams(window.location.search);
+      const vw = p.get("vw");
+      const vh = p.get("vh");
+      if (vw && vh && /^\d+$/.test(vw) && /^\d+$/.test(vh)) {
+        return { w: parseInt(vw, 10), h: parseInt(vh, 10) };
+      }
+      return null;
+    }
+
+    function parseGalleryFromQuery() {
+      const p = new URLSearchParams(window.location.search);
+      return (p.get("gallery") || "").trim();
+    }
+
+    function composeBbcode() {
+      const actressPart = actressHeadingPart();
+      const title = fields["title"].value.trim();
+      const imageBbcodeEl = fields["image-bbcode"];
+      const sanitizedImg = sanitizeImageBbcodeInput(imageBbcodeEl.value);
+      if (sanitizedImg !== imageBbcodeEl.value) imageBbcodeEl.value = sanitizedImg;
+      const imageBbcode = sanitizedImg;
+      const resolution = fields["resolution"].value.trim();
+      const uploadDate = fields["upload-date"].value.trim();
+      const studio = fields["studio"].value.trim();
+      const galleryLink = fields["gallery-link"].value.trim();
+      const linkCell = galleryLink
+        ? `[URL unfurl="false"]${galleryLink}[/URL]`
+        : "";
+
+      const output = `[HEADING=1]${actressPart} - ${title}[/HEADING]
+${imageBbcode}
+[TABLE width="50%"]
+[TR]
+[td width="25%"]Resolution[/td][td width="75%"]${resolution}[/td]
+[/TR]
+[TR]
+[td width="25%"]Date[/td][td width="75%"]${uploadDate}[/td]
+[/TR]
+[TR]
+[td width="25%"]Studio[/td][td width="75%"]${studio}[/td]
+[/TR]
+[TR]
+[td width="25%"]Link[/td][td width="75%"]${linkCell}[/td]
+[/TR]
+[/TABLE]`;
+      outputEl.value = output;
+    }
+
+    async function saveBbcodeToSceneCache() {
+      const fn = (activeFilename || "").trim();
+      if (!fn) return;
+      const studio = fields["studio"].value.trim();
+      const galleryLink = fields["gallery-link"].value.trim();
+      if (!studio && !galleryLink) return;
+      const r = await fetch("/api/scenes_bbcode_save", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          filename: fn,
+          studio,
+          gallery_link: galleryLink,
+          title: fields["title"].value.trim(),
+          upload_date: fields["upload-date"].value.trim(),
+          resolution: fields["resolution"].value.trim(),
+          stashdb_url: stashdbLinkEl.value.trim(),
+          scene_id: activeSceneId || undefined,
+        }),
+      });
+      const data = await r.json();
+      if (!r.ok || data.error) throw new Error(data.error || `HTTP ${r.status}`);
+    }
+
+    async function copyToClipboard() {
+      copyStatusEl.className = "";
+      copyStatusEl.textContent = "";
+      try {
+        let savedNote = "";
+        try {
+          const learned = await learnResolutionIfCorrected();
+          if (learned && learned.display) {
+            savedNote += " Resolution " + learned.display + " saved.";
+            composeBbcode();
+          }
+        } catch (learnErr) {
+          console.warn("resolution_presets/learn:", learnErr);
+        }
+        await navigator.clipboard.writeText(outputEl.value);
+        await savePerformerLinksIfAny();
+        if (activeFilename) {
+          try {
+            await saveBbcodeToSceneCache();
+            savedNote += " Scene row saved to scenes.json.";
+          } catch (saveErr) {
+            console.warn("scenes_bbcode_save:", saveErr);
+            savedNote += " (scene row not saved: " + (saveErr.message || saveErr) + ")";
+          }
+        }
+        copyStatusEl.className = "ok";
+        copyStatusEl.textContent = "Copied." + savedNote;
+      } catch (_err) {
+        copyStatusEl.className = "err";
+        copyStatusEl.textContent = "Copy failed.";
+      }
+    }
+
+    function prettyDate(iso) {
+      if (!iso) return "";
+      const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
+      if (!m) return iso;
+      const months = ["January","February","March","April","May","June",
+                      "July","August","September","October","November","December"];
+      const y = +m[1], mo = +m[2], d = +m[3];
+      return `${months[mo-1]} ${d}, ${y}`;
+    }
+
+    function extractSlrCodeFromUrl(u) {
+      try {
+        const url = new URL(String(u || "").trim());
+        const host = url.hostname.toLowerCase();
+        if (!host.endsWith("sexlikereal.com")) return null;
+        const parts = url.pathname.split("/").filter(Boolean);
+        if (!parts.length || parts[0].toLowerCase() !== "scenes") return null;
+        const slug = parts[parts.length - 1] || "";
+        const dash = slug.match(/-(\d{4,10})$/);
+        if (dash) return dash[1];
+        const plain = slug.match(/^(\d{4,10})$/);
+        return plain ? plain[1] : null;
+      } catch (_e) {
+        return null;
+      }
+    }
+
+    function findSlrSceneCode(urls) {
+      if (!Array.isArray(urls)) return null;
+      for (const u of urls) {
+        const c = extractSlrCodeFromUrl(u);
+        if (c) return c;
+      }
+      return null;
+    }
+
+    function thumbSheetBasename() {
+      const f = activeFilename || "";
+      if (!f) return "thumbs.png";
+      const stem = f.includes(".") ? f.slice(0, f.lastIndexOf(".")) : f;
+      return stem + "_thumbs.png";
+    }
+
+    function thumbSheetUrl(attachment) {
+      if (!activeFilename) return null;
+      let u = "/api/thumb_sheet?video=" + encodeURIComponent(activeFilename);
+      if (attachment) u += "&attachment=1";
+      return u;
+    }
+
+    function setupThumbSheet() {
+      thumbSheetCardEl.hidden = false;
+      thumbSheetAvailable = false;
+      if (!activeFilename) {
+        thumbSheetCardEl.hidden = true;
+        thumbSheetImgEl.hidden = true;
+        thumbSheetMissingEl.hidden = false;
+        thumbSheetMissingEl.textContent =
+          "Select a cached file to load the thumber thumbnail sheet.";
+        downloadThumbPngEl.style.visibility = "hidden";
+        return;
+      }
+      const url = thumbSheetUrl(false);
+      const urlAtt = thumbSheetUrl(true);
+      downloadThumbPngEl.href = urlAtt;
+      downloadThumbPngEl.setAttribute("download", thumbSheetBasename());
+      downloadThumbPngEl.style.visibility = "visible";
+      thumbSheetMissingEl.hidden = true;
+      thumbSheetImgEl.hidden = false;
+      thumbSheetImgEl.onload = () => {
+        thumbSheetAvailable = true;
+        thumbSheetMissingEl.hidden = true;
+      };
+      thumbSheetImgEl.onerror = () => {
+        thumbSheetAvailable = false;
+        thumbSheetImgEl.hidden = true;
+        thumbSheetMissingEl.hidden = false;
+        thumbSheetMissingEl.textContent =
+          "Could not load the sheet. Ensure thumber wrote <stem>_thumbs.png and gofup mounts " +
+          "the same host folder as thumber's THUMBER_THUMBS at /thumbs (GOFUP_THUMBS in compose).";
+        downloadThumbPngEl.style.visibility = "hidden";
+      };
+      thumbSheetImgEl.src = url;
+    }
+
+    async function downloadBothPngs() {
+      if (!activeSceneId) return;
+      const stash = `/api/stashdb_scene_image_png?scene_id=${encodeURIComponent(activeSceneId)}&index=${imageIndex}`;
+      const go = (href, name) => {
+        const a = document.createElement("a");
+        a.href = href;
+        a.rel = "noopener";
+        if (name) a.setAttribute("download", name);
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      };
+      helperStatusEl.className = "";
+      helperStatusEl.textContent = "";
+      go(stash, `${activeSceneId}_${imageIndex}.png`);
+      if (thumbSheetAvailable && thumbSheetUrl(true)) {
+        await new Promise((r) => setTimeout(r, 450));
+        go(thumbSheetUrl(true), thumbSheetBasename());
+      }
+      if (!slrPreviewCode) return;
+      await new Promise((r) => setTimeout(r, 450));
+      try {
+        helperStatusEl.textContent = "SLR preview → GIF (server)…";
+        const gr = await fetch("/api/slr_preview_gif?code=" + encodeURIComponent(slrPreviewCode));
+        if (!gr.ok) {
+          let msg = gr.statusText || String(gr.status);
+          try {
+            const errBody = await gr.json();
+            if (errBody && errBody.error) msg = errBody.error;
+          } catch (_j) { /* ignore */ }
+          throw new Error(msg);
+        }
+        const blob = await gr.blob();
+        const objUrl = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = objUrl;
+        a.rel = "noopener";
+        a.setAttribute("download", `slr_preview_${slrPreviewCode}.gif`);
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(objUrl);
+        helperStatusEl.className = "ok";
+        helperStatusEl.textContent = "Downloads started (incl. SLR GIF).";
+      } catch (e) {
+        helperStatusEl.className = "err";
+        helperStatusEl.textContent = "SLR GIF failed: " + (e && e.message ? e.message : e);
+      }
+    }
+
+    function showSceneImage(index) {
+      if (!sceneImages.length) {
+        imageCardEl.hidden = true;
+        downloadBothBtn.disabled = true;
+        return;
+      }
+      imageIndex = ((index % sceneImages.length) + sceneImages.length) % sceneImages.length;
+      const img = sceneImages[imageIndex];
+      imageCardEl.hidden = false;
+      sceneImageEl.src = img.url;
+      sceneImageEl.alt = "Scene image " + (imageIndex + 1) + " of " + sceneImages.length;
+      const dims = img.width && img.height ? `${img.width}×${img.height}` : "";
+      imageMetaEl.textContent = `Image ${imageIndex + 1} / ${sceneImages.length}` +
+                                (dims ? `  ·  ${dims}` : "");
+      openOriginalEl.href = img.url;
+      const pngHref = `/api/stashdb_scene_image_png?scene_id=${encodeURIComponent(activeSceneId)}` +
+                      `&index=${imageIndex}`;
+      downloadPngEl.href = pngHref;
+      downloadPngEl.setAttribute("download", `${activeSceneId}_${imageIndex}.png`);
+      downloadBothBtn.disabled = false;
+    }
+
+    async function loadScene() {
+      if (!activeSceneId) {
+        sceneMetaEl.innerHTML =
+          "<span style='color:var(--muted)'>No StashDB scene loaded — autofill a scene link or pick a cached file with a prior match.</span>";
+        imageCardEl.hidden = true;
+        downloadBothBtn.disabled = true;
+        return;
+      }
+      sceneMetaEl.textContent = "Loading scene…";
+      try {
+        const r = await fetch("/api/stashdb_scene_full", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ scene_id: activeSceneId }),
+        });
+        const data = await r.json();
+        if (!r.ok || data.error) throw new Error(data.error || `HTTP ${r.status}`);
+        const scene = data.scene || {};
+
+        const sceneUrl = scene.link || `${PAGE_DATA.stashdbScenesBase}/${activeSceneId}`;
+        stashdbLinkEl.value = sceneUrl;
+
+        const studioName = (scene.studio && scene.studio.name) || "";
+        const networkName =
+          (scene.studio && scene.studio.parent && scene.studio.parent.name) || "";
+        fields["title"].value = scene.title || "";
+        fields["upload-date"].value = prettyDate(scene.release_date || "");
+        fields["studio"].value = studioName;
+        await applyStudioResolution(studioName, {
+          network: networkName,
+          fillGallery: !fields["gallery-link"].value.trim(),
+        });
+
+        const metaBits = [];
+        metaBits.push(`<a href="${escAttr(sceneUrl)}" target="_blank" rel="noopener">${escHtml(scene.title || "(no title)")}</a>`);
+        if (studioName) metaBits.push(`<span>Studio: ${escHtml(studioName)}</span>`);
+        if (scene.release_date) metaBits.push(`<span>Date: ${escHtml(prettyDate(scene.release_date))}</span>`);
+        if (Array.isArray(scene.urls) && scene.urls.length) {
+          const links = scene.urls.map(
+            (u) => `<a href="${escAttr(u)}" target="_blank" rel="noopener">${escHtml(u)}</a>`
+          ).join("  ");
+          metaBits.push(`<span>External: ${links}</span>`);
+        }
+        sceneMetaEl.innerHTML = metaBits.join("");
+
+        setPerformers(scene.performers || []);
+        await applySavedPerformerLinks();
+
+        sceneImages = Array.isArray(scene.images) ? scene.images : [];
+        showSceneImage(0);
+
+        slrPreviewCode = findSlrSceneCode(scene.urls || []);
+        if (slrPreviewCode) {
+          downloadBothBtn.textContent = "Download PNGs + SLR GIF";
+          downloadBothBtn.title =
+            "Cover PNG, thumbnail sheet (if ready), and SLR VR preview as GIF (fetched on click).";
+        } else {
+          downloadBothBtn.textContent = "Download both PNGs";
+          downloadBothBtn.title = "StashDB cover PNG + thumbnail sheet";
+        }
+
+        composeBbcode();
+        helperStatusEl.className = "ok";
+        helperStatusEl.textContent = "Scene loaded.";
+      } catch (err) {
+        sceneMetaEl.innerHTML = `<span class='err'>Failed to load scene: ${escHtml(err.message || err)}</span>`;
+        helperStatusEl.className = "err";
+        helperStatusEl.textContent = "Could not load scene.";
+        downloadBothBtn.disabled = true;
+        slrPreviewCode = null;
+        downloadBothBtn.textContent = "Download both PNGs";
+        downloadBothBtn.title = "StashDB cover PNG + thumbnail sheet";
+        addActressRow();
+      }
+    }
+
+    async function applyStudioResolution(studioName, opts = {}) {
+      const studio = String(studioName || fields["studio"].value || "").trim();
+      if (!studio) return null;
+      const network = String(opts.network || "").trim();
+      try {
+        const r = await fetch("/api/resolve_studio", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ studio, network }),
+        });
+        const data = await r.json();
+        if (!r.ok || data.error) return null;
+        if (data.studio) fields["studio"].value = data.studio;
+        const fillGallery = opts.fillGallery !== false;
+        if (fillGallery && data.gallery_link && !fields["gallery-link"].value.trim()) {
+          fields["gallery-link"].value = data.gallery_link;
+        }
+        composeBbcode();
+        return data;
+      } catch (_err) {
+        return null;
+      }
+    }
+
+    async function loadCachedSceneEntry(fn) {
+      if (!fn) return;
+      try {
+        const r = await fetch(
+          "/api/cached_scene?filename=" + encodeURIComponent(fn)
+        );
+        const data = await r.json();
+        const bb = (data.entry && data.entry.bbcode) || {};
+        if (bb.title && !fields["title"].value.trim()) fields["title"].value = bb.title;
+        if (bb.upload_date && !fields["upload-date"].value.trim()) {
+          fields["upload-date"].value = bb.upload_date;
+        }
+        if (bb.resolution && !fields["resolution"].value.trim()) {
+          fields["resolution"].value = bb.resolution;
+          lastAutoResolution = null;
+        }
+        if (bb.studio && !fields["studio"].value.trim()) {
+          fields["studio"].value = bb.studio;
+        }
+        if (bb.gallery_link && !fields["gallery-link"].value.trim()) {
+          fields["gallery-link"].value = bb.gallery_link;
+        }
+        if (bb.stashdb_url && !stashdbLinkEl.value.trim()) {
+          stashdbLinkEl.value = bb.stashdb_url;
+        }
+      } catch (_err) { /* optional */ }
+    }
+
+    async function loadCachedFilesList(selectName) {
+      try {
+        const r = await fetch("/api/cached_files");
+        const data = await r.json();
+        if (!r.ok || data.error) throw new Error(data.error || `HTTP ${r.status}`);
+        cachedFileByName.clear();
+        const files = data.files || [];
+        cachedFileSelectEl.innerHTML = '<option value="">— none —</option>';
+        for (const f of files) {
+          cachedFileByName.set(f.filename, f);
+          const opt = document.createElement("option");
+          opt.value = f.filename;
+          let tag = "";
+          if (f.scene_id) tag = " · scene";
+          else if (f.edit_id) tag = " · edit";
+          else if (f.draft_id) tag = " · draft";
+          opt.textContent = f.filename + tag;
+          cachedFileSelectEl.appendChild(opt);
+        }
+        if (selectName) cachedFileSelectEl.value = selectName;
+        cachedFileHintEl.textContent = files.length
+          ? `${files.length} file(s) documented in scenes.json`
+          : "No cached files yet — hash a download first.";
+      } catch (err) {
+        cachedFileHintEl.textContent = "Could not load cache list: " + (err.message || err);
+      }
+    }
+
+    async function applyCachedFileSelection(name, opts = {}) {
+      const fn = (name || "").trim();
+      setActiveFilename(fn, opts);
+      await applyResolutionFromUrlOrCache();
+      if (!fn) {
+        if (!opts.keepScene) {
+          setActiveSceneId("", opts);
+          await loadScene();
+        }
+        return;
+      }
+      await loadCachedSceneEntry(fn);
+
+      const meta = cachedFileByName.get(fn);
+      if (meta && meta.scene_id) {
+        if (!opts.keepScene) {
+          setActiveSceneId(meta.scene_id, opts);
+        } else if (!activeSceneId) {
+          setActiveSceneId(meta.scene_id, opts);
+        }
+        if (!stashdbLinkEl.value.trim()) {
+          stashdbLinkEl.value = `${PAGE_DATA.stashdbScenesBase}/${meta.scene_id}`;
+        }
+      } else if (meta && !stashdbLinkEl.value.trim()) {
+        if (meta.edit_id) {
+          stashdbLinkEl.value = `https://stashdb.org/edits/${meta.edit_id}`;
+        } else if (meta.draft_id) {
+          stashdbLinkEl.value = `https://stashdb.org/drafts/${meta.draft_id}`;
+        }
+      }
+
+      if (activeSceneId) {
+        await loadScene();
+      }
+
+      const studioNow = fields["studio"].value.trim();
+      if (studioNow) {
+        await applyStudioResolution(studioNow, {
+          fillGallery: !fields["gallery-link"].value.trim(),
+        });
+      }
+    }
+
+    function formatFileSize(b) {
+      if (!b) return "";
+      const u = ["B", "KB", "MB", "GB", "TB"];
+      const i = Math.floor(Math.log(b) / Math.log(1024));
+      return (b / Math.pow(1024, i)).toFixed(1) + " " + u[i];
+    }
+
+    async function loadDownloadsBrowse() {
+      try {
+        const r = await fetch("/api/browse?path=" + encodeURIComponent("/downloads"));
+        const data = await r.json();
+        const entries = (data.entries || [])
+          .filter((e) => !e.is_dir)
+          .sort((a, b) => a.name.localeCompare(b.name));
+        if (!entries.length) {
+          downloadsFileListEl.innerHTML =
+            '<div style="padding:0.6rem;color:var(--muted);font-size:0.85rem;">No files in /downloads</div>';
+        } else {
+          downloadsFileListEl.innerHTML = entries
+            .map(
+              (e) =>
+                `<div class="file-item" data-name="${escAttr(e.name)}">` +
+                `<span>${escHtml(e.name)}</span>` +
+                `<span class="sz">${formatFileSize(e.size)}</span></div>`,
+            )
+            .join("");
+          downloadsFileListEl.querySelectorAll(".file-item").forEach((el) => {
+            el.addEventListener("click", () => {
+              downloadsFileListEl.querySelectorAll(".file-item").forEach((x) => x.classList.remove("selected"));
+              el.classList.add("selected");
+              void applyCachedFileSelection(el.dataset.name);
+              downloadsFileListEl.style.display = "none";
+            });
+          });
+        }
+        downloadsFileListEl.style.display = "block";
+      } catch (err) {
+        cachedFileHintEl.textContent = "Browse failed: " + (err.message || err);
+      }
+    }
+
+    async function persistStashdbLinkFromAutofill(data) {
+      const fn = (activeFilename || "").trim();
+      if (!fn) return;
+      const prev = cachedFileByName.get(fn) || {};
+      if (prev.scene_id) return;
+
+      const body = { filename: fn };
+      if (data.scene_id) body.scene_id = data.scene_id;
+      if (data.edit_id) body.edit_id = data.edit_id;
+      if (data.draft_id) body.draft_id = data.draft_id;
+      if (data.source === "edit" && data.id && !body.edit_id) body.edit_id = data.id;
+      if (data.source === "draft" && data.id && !body.draft_id) body.draft_id = data.id;
+      if (!body.scene_id && !body.edit_id && !body.draft_id) return;
+
+      const r = await fetch("/api/scenes_stashdb_link", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const res = await r.json();
+      if (!r.ok || res.error) throw new Error(res.error || `HTTP ${r.status}`);
+      const stash = res.stashdb || {};
+      cachedFileByName.set(fn, {
+        filename: fn,
+        scene_id: stash.scene_id || null,
+        edit_id: stash.edit_id || null,
+        draft_id: stash.draft_id || null,
+        matched_by: stash.matched_by,
+      });
+      await loadCachedFilesList(fn);
+    }
+
+    async function autofillFromStashdb() {
+      const url = stashdbLinkEl.value.trim();
+      stashdbStatusEl.className = "";
+      stashdbStatusEl.textContent = "";
+      if (!url) {
+        stashdbStatusEl.className = "err";
+        stashdbStatusEl.textContent = "Enter a StashDB scene, edit, or draft link first.";
+        return;
+      }
+      stashdbAutofillBtn.disabled = true;
+      stashdbStatusEl.textContent = "Fetching from StashDB…";
+      try {
+        const r = await fetch("/api/stashdb_autofill", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            url,
+            filename: activeFilename || undefined,
+          }),
+        });
+        const data = await r.json();
+        if (!r.ok || data.error) throw new Error(data.error || `HTTP ${r.status}`);
+
+        setPerformers((data.actresses || []).map((n) => ({ name: n })));
+        fields["title"].value = data.title || "";
+        fields["upload-date"].value = data.upload_date || "";
+        fields["studio"].value = data.studio || "";
+        if (data.gallery_link && !fields["gallery-link"].value.trim()) {
+          fields["gallery-link"].value = data.gallery_link;
+        }
+        if (data.image_bbcode) {
+          fields["image-bbcode"].value = sanitizeImageBbcodeInput(data.image_bbcode);
+        }
+        if (data.scene_url) stashdbLinkEl.value = data.scene_url;
+        else if (data.scene_id) {
+          stashdbLinkEl.value = `${PAGE_DATA.stashdbScenesBase}/${data.scene_id}`;
+        }
+        if (data.scene_id) {
+          setActiveSceneId(data.scene_id);
+          await loadScene();
+        } else if (data.studio) {
+          await applyStudioResolution(data.studio, {
+            network: data.network_studio || "",
+            fillGallery: !fields["gallery-link"].value.trim(),
+          });
+        }
+        if (
+          !fields["gallery-link"].value.trim() &&
+          data.gallery_link
+        ) {
+          fields["gallery-link"].value = data.gallery_link;
+        }
+        try {
+          await persistStashdbLinkFromAutofill(data);
+        } catch (linkErr) {
+          console.warn("scenes_stashdb_link:", linkErr);
+        }
+        await applySavedPerformerLinks();
+        composeBbcode();
+        stashdbStatusEl.className = "ok";
+        const src = data.source ? ` (${data.source})` : "";
+        let note = "Autofill complete" + src + ".";
+        if (data.gallery_link && !activeFilename) {
+          note += " Gallery from folders.json";
+          if (data.gallery_match) note += ` (${data.gallery_match} match)`;
+          if (data.studio_alias) note += " via alias";
+          note += ".";
+        }
+        if (activeFilename && (data.scene_id || data.edit_id || data.draft_id || data.id)) {
+          note += " Linked to cached file in scenes.json.";
+        }
+        stashdbStatusEl.textContent = note;
+      } catch (err) {
+        stashdbStatusEl.className = "err";
+        stashdbStatusEl.textContent = err.message || "Autofill failed.";
+      } finally {
+        stashdbAutofillBtn.disabled = false;
+      }
+    }
+
+    addActressBtn.addEventListener("click", () => addActressRow());
+    copyBtn.addEventListener("click", copyToClipboard);
+    downloadBothBtn.addEventListener("click", () => { void downloadBothPngs(); });
+    cachedFileSelectEl.addEventListener("change", () => {
+      void applyCachedFileSelection(cachedFileSelectEl.value);
+    });
+    cachedFileRefreshBtn.addEventListener("click", () => {
+      void loadCachedFilesList(cachedFileSelectEl.value);
+    });
+    cachedFileBrowseBtn.addEventListener("click", () => {
+      if (downloadsFileListEl.style.display === "none" || !downloadsFileListEl.style.display) {
+        void loadDownloadsBrowse();
+      } else {
+        downloadsFileListEl.style.display = "none";
+      }
+    });
+    stashdbAutofillBtn.addEventListener("click", () => { void autofillFromStashdb(); });
+    fieldIds.forEach((id) => fields[id].addEventListener("input", composeBbcode));
+    imageNextBtn.addEventListener("click", () => showSceneImage(imageIndex + 1));
+
+    const imageBbcodeEl = fields["image-bbcode"];
+    imageBbcodeEl.addEventListener("paste", (e) => {
+      e.preventDefault();
+      const pasted = (e.clipboardData || window.clipboardData).getData("text/plain") || "";
+      const cleaned = sanitizeImageBbcodeInput(pasted);
+      const start = imageBbcodeEl.selectionStart;
+      const end = imageBbcodeEl.selectionEnd;
+      imageBbcodeEl.value = imageBbcodeEl.value.slice(0, start) + cleaned + imageBbcodeEl.value.slice(end);
+      imageBbcodeEl.selectionStart = imageBbcodeEl.selectionEnd = start + cleaned.length;
+      composeBbcode();
+    });
+    imageBbcodeEl.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " " || e.code === "Space") e.preventDefault();
+    });
+    imageBbcodeEl.addEventListener("input", () => {
+      const s = sanitizeImageBbcodeInput(imageBbcodeEl.value);
+      if (s !== imageBbcodeEl.value) imageBbcodeEl.value = s;
+      composeBbcode();
+    });
+
+    async function applyResolutionFromUrlOrCache() {
+      const dimsFromQuery = parseVideoDimsFromQuery();
+      if (dimsFromQuery) {
+        setAutoResolution(dimsFromQuery.w, dimsFromQuery.h);
+        return;
+      }
+      if (!activeFilename) return;
+      try {
+        const r = await fetch(
+          "/api/cached_scene?filename=" + encodeURIComponent(activeFilename)
+        );
+        const data = await r.json();
+        const e = data.entry || {};
+        const vw = e.video_width;
+        const vh = e.video_height;
+        if (vw != null && vh != null) {
+          setAutoResolution(vw, vh);
+          return;
+        }
+        // Last-resort path for older cache rows: ask hasher directly.
+        const h = await fetch("/api/stashdb_video_hash", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ filename: activeFilename, algorithm: "OSHASH" }),
+        });
+        const hd = await h.json();
+        if (h.ok && hd && hd.width != null && hd.height != null) {
+          setAutoResolution(hd.width, hd.height);
+        }
+      } catch (_err) { /* optional */ }
+    }
+
+    fields["resolution"].addEventListener("input", () => {
+      const parsed = parseResolutionField(fields["resolution"].value);
+      if (
+        !lastAutoResolution ||
+        !parsed.w ||
+        parsed.w !== lastAutoResolution.w ||
+        parsed.h !== lastAutoResolution.h ||
+        fields["resolution"].value.trim() !== lastAutoResolution.value
+      ) {
+        lastAutoResolution = null;
+      }
+    });
+
+    (async function initBbcode() {
+      await loadLearnedResolutionPresets();
+      const galleryFromQuery = PAGE_DATA.gallery || parseGalleryFromQuery();
+      if (galleryFromQuery && !fields["gallery-link"].value.trim()) {
+        fields["gallery-link"].value = galleryFromQuery;
+      }
+      await loadCachedFilesList(activeFilename);
+      if (activeFilename) {
+        await applyCachedFileSelection(activeFilename, {
+          syncUrl: false,
+          keepScene: !!activeSceneId,
+        });
+      } else {
+        setupThumbSheet();
+        await loadScene();
+      }
+      if (!actressListEl.querySelector(".actress-row")) addActressRow();
+      composeBbcode();
+    })();
+  </script>
+  <script id="jpg6-pup-bootstrap">
+    (function () {
+      const STORAGE_KEY = "monolithJpg6ToAlbum";
+      const UPLOAD_BASE = "https://jpg6.su/upload";
+      const FROM_SERVER = {{ (jpg6_to_album or "")|tojson }};
+      function effectiveAlbumId() {
+        const s = (FROM_SERVER || "").trim();
+        if (s) return s;
+        try {
+          return (localStorage.getItem(STORAGE_KEY) || "").trim();
+        } catch (_e) {
+          return "";
+        }
+      }
+      function cheveretoToAlbumToken(raw) {
+        const s = String(raw || "")
+          .trim()
+          .replace(/\/+$/, "");
+        if (!s) return "";
+        const seg = s.split("/").filter(Boolean).pop() || s;
+        const bits = seg.split(".");
+        if (bits.length >= 2) return bits[1] ? bits[1] : bits[0];
+        return bits[0];
+      }
+      function monolithJpg6UploadUrl() {
+        const k = effectiveAlbumId();
+        if (!k) return UPLOAD_BASE;
+        const token = cheveretoToAlbumToken(k);
+        return token ? UPLOAD_BASE + "?toAlbum=" + encodeURIComponent(token) : UPLOAD_BASE;
+      }
+      window.monolithJpg6UploadUrl = monolithJpg6UploadUrl;
+
+      const pup = document.createElement("script");
+      // Chevereto PUP reads config from document.currentScript OR #chevereto-pup-src.
+      // Dynamic + async scripts often leave currentScript null; without the id, data-url
+      // (incl. ?toAlbum=) is ignored and the popup opens plain /upload.
+      pup.id = "chevereto-pup-src";
+      pup.async = false;
+      pup.src = "https://jpg6.su/sdk/pup.js";
+      pup.setAttribute("data-url", monolithJpg6UploadUrl());
+      pup.setAttribute("data-mode", "manual");
+      pup.setAttribute("data-auto-insert", "bbcode-embed-medium");
+      pup.setAttribute("data-lang", "en");
+      const boot = document.getElementById("jpg6-pup-bootstrap");
+      (boot || document.body).insertAdjacentElement("afterend", pup);
+
+      document.addEventListener("DOMContentLoaded", () => {
+        const openA = document.getElementById("jpg6-open-upload");
+        if (openA) openA.href = monolithJpg6UploadUrl();
+        const inp = document.getElementById("jpg6-to-album");
+        const apply = document.getElementById("jpg6-to-album-apply");
+        if (inp) {
+          if ((FROM_SERVER || "").trim()) {
+            inp.value = (FROM_SERVER || "").trim();
+          } else {
+            try {
+              inp.value = localStorage.getItem(STORAGE_KEY) || "";
+            } catch (_e) {}
+          }
+        }
+        if (apply && inp) {
+          apply.addEventListener("click", () => {
+            const v = (inp.value || "").trim();
+            try {
+              if (v) localStorage.setItem(STORAGE_KEY, v);
+              else localStorage.removeItem(STORAGE_KEY);
+            } catch (_e) {}
+            location.reload();
+          });
+        }
+      });
+    })();
+  </script>
+</body>
+</html>

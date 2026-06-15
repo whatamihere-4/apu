@@ -1,0 +1,861 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>gofup</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0e0e10;
+      --surface: #18181b;
+      --border: #2d2d33;
+      --accent: #6d5dfc;
+      --accent-hover: #8577fd;
+      --text: #e4e4e7;
+      --muted: #71717a;
+      --success: #22c55e;
+      --error: #ef4444;
+      --warn: #f59e0b;
+      --radius: 10px;
+    }
+
+    body {
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 2rem 1rem;
+    }
+
+    h1 { font-size: 2rem; font-weight: 700; margin-bottom: 0.25rem; letter-spacing: -0.02em; }
+    .subtitle { color: var(--muted); font-size: 0.9rem; margin-bottom: 2rem; }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.5rem;
+      width: 100%;
+      max-width: 600px;
+      margin-bottom: 1.25rem;
+    }
+    .card h2 {
+      font-size: 1rem; font-weight: 600; margin-bottom: 1rem;
+      display: flex; align-items: center; gap: 0.5rem;
+    }
+    .card h2 .icon { font-size: 1.1rem; }
+
+    label {
+      display: block; font-size: 0.8rem; color: var(--muted);
+      margin-bottom: 0.35rem; text-transform: uppercase; letter-spacing: 0.04em;
+    }
+
+    input[type="text"], input[type="url"] {
+      width: 100%; padding: 0.65rem 0.85rem;
+      background: var(--bg); border: 1px solid var(--border);
+      border-radius: 6px; color: var(--text); font-size: 0.9rem;
+      outline: none; transition: border-color 0.15s;
+    }
+    input:focus, select:focus { border-color: var(--accent); }
+
+    select {
+      width: 100%; padding: 0.65rem 0.85rem;
+      background: var(--bg); border: 1px solid var(--border);
+      border-radius: 6px; color: var(--text); font-size: 0.9rem;
+      outline: none; cursor: pointer;
+    }
+
+    .folder-row { display: flex; gap: 0.5rem; align-items: flex-end; margin-top: 0.5rem; }
+    .folder-row input { flex: 1; }
+
+    .btn-sm {
+      padding: 0.55rem 0.9rem; font-size: 0.8rem; font-weight: 600;
+      border: none; border-radius: 6px; cursor: pointer; color: #fff;
+      background: var(--accent); white-space: nowrap;
+      transition: background 0.15s, opacity 0.15s;
+    }
+    .btn-sm:hover { background: var(--accent-hover); }
+    .btn-sm:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .btn {
+      display: inline-flex; align-items: center; justify-content: center;
+      padding: 0.6rem 1.3rem; font-size: 0.85rem; font-weight: 600;
+      border: none; border-radius: 6px; cursor: pointer;
+      transition: background 0.15s, opacity 0.15s;
+      color: #fff; background: var(--accent); margin-top: 1rem;
+    }
+    .btn:hover { background: var(--accent-hover); }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .file-browser { margin-top: 0.75rem; }
+    .breadcrumb {
+      display: flex; flex-wrap: wrap; gap: 0.15rem; align-items: center;
+      font-size: 0.8rem; color: var(--muted); margin-bottom: 0.75rem;
+    }
+    .breadcrumb span { cursor: pointer; color: var(--accent); transition: color 0.1s; }
+    .breadcrumb span:hover { color: var(--accent-hover); }
+    .breadcrumb .sep { color: var(--muted); cursor: default; }
+
+    .file-list {
+      max-height: 300px; overflow-y: auto;
+      border: 1px solid var(--border); border-radius: 6px; background: var(--bg);
+    }
+    .file-list::-webkit-scrollbar { width: 6px; }
+    .file-list::-webkit-scrollbar-track { background: transparent; }
+    .file-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+    .file-item {
+      display: flex; align-items: center; gap: 0.6rem;
+      padding: 0.55rem 0.85rem; cursor: pointer;
+      transition: background 0.1s; font-size: 0.85rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .file-item:last-child { border-bottom: none; }
+    .file-item:hover { background: rgba(109, 93, 252, 0.08); }
+    .file-item.selected { background: rgba(109, 93, 252, 0.15); }
+
+    .file-icon { font-size: 1rem; width: 1.5rem; text-align: center; flex-shrink: 0; }
+    .file-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .file-size { color: var(--muted); font-size: 0.75rem; flex-shrink: 0; }
+
+    .status-area { width: 100%; max-width: 600px; }
+
+    .job {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 1rem 1.25rem;
+      margin-bottom: 0.75rem; font-size: 0.85rem;
+    }
+    .job-header {
+      display: flex; align-items: flex-start; justify-content: space-between; gap: 0.5rem;
+    }
+    .job .job-title { font-weight: 600; margin-bottom: 0.4rem; flex: 1; }
+    .job .job-folder {
+      font-size: 0.75rem; color: var(--accent); margin-bottom: 0.35rem;
+      display: flex; align-items: center; gap: 0.3rem;
+    }
+    .job .job-status { color: var(--muted); margin-bottom: 0.5rem; }
+    .job .job-status.done { color: var(--success); }
+    .job .job-status.error { color: var(--error); }
+    .job .job-status.cancelled { color: var(--warn); }
+    .job .job-status.queued { color: var(--muted); font-style: italic; }
+    .job .job-link { color: var(--accent); text-decoration: none; word-break: break-all; }
+    .job .job-link:hover { text-decoration: underline; }
+    .job .job-helper { margin-top: 0.4rem; font-size: 0.88rem; }
+    .job .job-helper.match  { padding-left: 0.4rem; border-left: 2px solid rgba(245,158,11,0.55); }
+    .job .job-helper.nomatch { padding-left: 0.4rem; border-left: 2px solid rgba(34,197,94,0.45); }
+    .job .job-helper.warn    { padding-left: 0.4rem; border-left: 2px solid rgba(239,68,68,0.45); }
+    .job .muted { color: var(--muted); }
+    .job .small { font-size: 0.78rem; }
+    .job .stashdb-contrib .stashdb-contrib-msg { margin-bottom: 0.35rem; line-height: 1.4; }
+    .job .stashdb-contrib .stashdb-fp-row { margin-top: 0.28rem; line-height: 1.45; }
+    .job .stashdb-contrib .stashdb-fp-label { color: var(--muted); font-weight: 600; margin-right: 0.4rem; }
+    .job .stashdb-contrib .stashdb-hash {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.82em; word-break: break-all;
+    }
+    .job .stashdb-contrib .stashdb-fp-fail { color: var(--warn); margin-top: 0.25rem; }
+
+    .opt-row {
+      display: flex; align-items: flex-start; gap: 0.45rem;
+      cursor: pointer; font-size: 0.88rem; line-height: 1.35;
+    }
+    .opt-row input { margin-top: 0.2rem; flex-shrink: 0; }
+
+    .cancel-btn {
+      padding: 0.3rem 0.6rem; font-size: 0.7rem; font-weight: 600;
+      border: 1px solid var(--error); border-radius: 4px; cursor: pointer;
+      background: transparent; color: var(--error);
+      transition: background 0.15s, color 0.15s;
+      white-space: nowrap; flex-shrink: 0; margin-top: 0.15rem;
+    }
+    .cancel-btn:hover { background: var(--error); color: #fff; }
+
+    .progress-wrap { width: 100%; height: 6px; background: var(--bg); border-radius: 3px; overflow: hidden; }
+    .progress-bar {
+      height: 100%; background: var(--accent); border-radius: 3px;
+      transition: width 0.4s ease; width: 0%;
+    }
+    .progress-bar.indeterminate {
+      width: 30%;
+      animation: indeterminate 1.5s ease-in-out infinite;
+    }
+    @keyframes indeterminate {
+      0%   { margin-left: 0%;   width: 30%; }
+      50%  { margin-left: 40%;  width: 30%; }
+      100% { margin-left: 0%;   width: 30%; }
+    }
+    .progress-detail { font-size: 0.75rem; color: var(--muted); margin-top: 0.3rem; }
+    .progress-log {
+      margin-top: 0.45rem;
+      padding: 0.45rem 0.55rem;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.02);
+      color: var(--muted);
+      font-size: 0.72rem;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      line-height: 1.35;
+      max-height: 92px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      display: none;
+    }
+
+    .empty-msg { text-align: center; padding: 2rem; color: var(--muted); font-size: 0.85rem; }
+  </style>
+</head>
+<body>
+  <h1>gofup</h1>
+  <p class="subtitle" id="provider-subtitle">Upload &mdash; from link or file</p>
+  <p class="subtitle" style="margin-top:-0.5rem;">
+    <a href="/bbcode" style="color:var(--accent); text-decoration:none;">BBCode generator</a>
+    &nbsp;·&nbsp;
+    <a href="/aliases" style="color:var(--accent); text-decoration:none;">Studio aliases</a>
+    &nbsp;·&nbsp;
+    <a href="/stashdb-scene-draft" style="color:var(--accent); text-decoration:none;">StashDB draft submit</a>
+    &nbsp;·&nbsp;
+    <a href="/oshash" style="color:var(--accent); text-decoration:none;">Remote OSHASH</a>
+    ·
+    <a href="/phash" style="color:var(--accent); text-decoration:none;">Remote PHASH</a>
+    ·
+    <a href="/remotehash" style="color:var(--accent); text-decoration:none;">Remote hashes</a>
+    ·
+    <a href="/md5" style="color:var(--accent); text-decoration:none;">MD5 → StashDB</a>
+  </p>
+
+  <div class="card">
+    <h2><span class="icon">&#128449;</span> <span id="destination-title">Upload Destination</span></h2>
+    <label for="folder-select">Upload to folder</label>
+    <select id="folder-select">
+      <option value="">Root (default)</option>
+    </select>
+    <div class="folder-row" style="margin-top:0.6rem;">
+      <input type="text" id="new-folder-name" placeholder="New folder name...">
+      <button class="btn-sm" id="create-folder-btn">Create</button>
+    </div>
+    <details style="margin-top:0.75rem;">
+      <summary style="font-size:0.8rem; color:var(--muted); cursor:pointer;">Add existing folder by ID</summary>
+      <div class="folder-row" style="margin-top:0.4rem;">
+        <input type="text" id="existing-folder-id" placeholder="Folder ID from share URL...">
+        <input type="text" id="existing-folder-name" placeholder="Label" style="max-width:120px;">
+        <button class="btn-sm" id="add-folder-btn">Add</button>
+      </div>
+    </details>
+  </div>
+
+  <div class="card">
+    <h2><span class="icon">&#128279;</span> Upload from Link</h2>
+    <label for="link-input">Download URL</label>
+    <input type="url" id="link-input" placeholder="https://example.com/file.zip or any direct link">
+    <button class="btn" id="link-btn">Download &amp; Upload</button>
+  </div>
+
+  <div class="card">
+    <h2><span class="icon">&#128193;</span> Upload from File</h2>
+    <label>Browse /downloads</label>
+    <div class="file-browser">
+      <div class="breadcrumb" id="breadcrumb"></div>
+      <div class="file-list" id="file-list">
+        <div class="empty-msg">Loading...</div>
+      </div>
+    </div>
+    <div style="margin-top:0.75rem;">
+      <label for="path-input">Or type path manually</label>
+      <input type="text" id="path-input" placeholder="/downloads/some/folder/file.zip">
+    </div>
+    <button class="btn" id="upload-btn">Upload</button>
+  </div>
+
+  <div class="card" style="padding:0.75rem 1rem;">
+    <div style="display:flex; flex-wrap:wrap; gap:0.5rem; align-items:center;">
+      <span style="font-size:0.85rem; color:var(--muted);">Queue tools</span>
+      <button class="btn-sm" type="button" id="export-queue-btn">Export pending queue</button>
+      <button class="btn-sm" type="button" id="copy-queue-btn">Copy as JSON</button>
+    </div>
+  </div>
+
+  <div class="status-area" id="jobs-area"></div>
+
+  <script>
+    let currentDir = '/downloads';
+    let selectedPath = null;
+    let jobsPollTimer = null;
+    let jobsPollInFlight = false;
+
+    async function api(endpoint, body) {
+      const r = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await r.json();
+      if (!r.ok || data.error) throw new Error(data.error || `HTTP ${r.status}`);
+      return data;
+    }
+
+    async function apiGet(endpoint) {
+      const r = await fetch(endpoint);
+      return r.json();
+    }
+
+    // ── File browser ──────────────────────
+    async function browse(dir) {
+      currentDir = dir;
+      selectedPath = null;
+      document.getElementById('path-input').value = '';
+      const data = await apiGet(`/api/browse?path=${encodeURIComponent(dir)}`);
+      renderBreadcrumb(dir);
+      renderFileList(data);
+    }
+
+    function renderBreadcrumb(dir) {
+      const el = document.getElementById('breadcrumb');
+      const parts = dir.split('/').filter(Boolean);
+      let html = '', built = '';
+      parts.forEach((p, i) => {
+        built += '/' + p;
+        const path = built;
+        if (i > 0) html += '<span class="sep">/</span>';
+        html += `<span onclick="browse('${path}')">${p}</span>`;
+      });
+      el.innerHTML = html;
+    }
+
+    function renderFileList(data) {
+      const el = document.getElementById('file-list');
+      if (!data.entries || data.entries.length === 0) {
+        el.innerHTML = '<div class="empty-msg">Empty directory</div>';
+        return;
+      }
+      const dirs  = data.entries.filter(e => e.is_dir).sort((a,b) => a.name.localeCompare(b.name));
+      const files = data.entries.filter(e => !e.is_dir).sort((a,b) => a.name.localeCompare(b.name));
+      el.innerHTML = [...dirs, ...files].map(e => {
+        const icon = e.is_dir ? '&#128193;' : '&#128196;';
+        const size = e.is_dir ? '' : formatSize(e.size);
+        return `<div class="file-item" data-path="${e.path}" data-dir="${e.is_dir}"
+                     onclick="handleFileClick(this)">
+          <span class="file-icon">${icon}</span>
+          <span class="file-name">${e.name}</span>
+          <span class="file-size">${size}</span>
+        </div>`;
+      }).join('');
+    }
+
+    function handleFileClick(el) {
+      const path = el.dataset.path;
+      const isDir = el.dataset.dir === 'true' || el.dataset.dir === 'True';
+      if (isDir) { browse(path); return; }
+      document.querySelectorAll('.file-item').forEach(x => x.classList.remove('selected'));
+      el.classList.add('selected');
+      selectedPath = path;
+      document.getElementById('path-input').value = path;
+    }
+
+    function formatSize(bytes) {
+      if (!bytes || bytes === 0) return '0 B';
+      const u = ['B','KB','MB','GB','TB'];
+      const i = Math.floor(Math.log(bytes) / Math.log(1024));
+      return (bytes / Math.pow(1024, i)).toFixed(1) + ' ' + u[i];
+    }
+
+    // ── Job rendering ─────────────────────
+    function sortedJobEntries(allJobs) {
+      return Object.entries(allJobs).sort((a, b) => {
+        const ta = a[1].queued_at || '';
+        const tb = b[1].queued_at || '';
+        if (ta && tb) return ta.localeCompare(tb);
+        if (ta) return -1;
+        if (tb) return 1;
+        return a[0].localeCompare(b[0]);
+      });
+    }
+
+    function reorderJobsInDom(idsInOrder) {
+      const area = document.getElementById('jobs-area');
+      for (const id of idsInOrder) {
+        const el = document.getElementById(`job-${id}`);
+        if (el) area.appendChild(el);
+      }
+    }
+
+    function ensureJobEl(id, title, folderName) {
+      let el = document.getElementById(`job-${id}`);
+      if (el) return el;
+      const area = document.getElementById('jobs-area');
+      el = document.createElement('div');
+      el.className = 'job';
+      el.id = `job-${id}`;
+
+      const folderHtml = folderName
+        ? `<div class="job-folder">&#128449; ${escHtml(folderName)}</div>`
+        : '';
+
+      el.innerHTML =
+        `<div class="job-header">` +
+          `<div class="job-title">${escHtml(title)}</div>` +
+          `<button class="cancel-btn" data-jid="${id}" onclick="cancelJob('${id}')">Cancel</button>` +
+        `</div>` +
+        folderHtml +
+        `<div class="job-status"></div>` +
+        `<div class="progress-wrap"><div class="progress-bar"></div></div>` +
+        `<div class="progress-detail"></div>` +
+        `<div class="progress-log"></div>`;
+      area.appendChild(el);
+      return el;
+    }
+
+    function escHtml(s) {
+      const d = document.createElement('div');
+      d.textContent = s;
+      return d.innerHTML;
+    }
+
+    const THUMBER_LOG_SCROLL_EPS = 8;
+
+    function thumberLogIsPinnedToBottom(logEl) {
+      const max = logEl.scrollHeight - logEl.clientHeight;
+      if (max <= 0) return true;
+      return max - logEl.scrollTop <= THUMBER_LOG_SCROLL_EPS;
+    }
+
+    function attachThumberLogScrollBehavior(logEl) {
+      if (logEl.dataset.thumberScrollBound) return;
+      logEl.dataset.thumberScrollBound = '1';
+      logEl.addEventListener('scroll', () => {
+        logEl.dataset.thumberFollow = thumberLogIsPinnedToBottom(logEl) ? '1' : '0';
+      });
+    }
+
+    function renderJob(id, job) {
+      const el = ensureJobEl(id, job.title || id, job.folder_name || '');
+      const statusEl  = el.querySelector('.job-status');
+      const barEl     = el.querySelector('.progress-bar');
+      const detailEl  = el.querySelector('.progress-detail');
+      const logEl     = el.querySelector('.progress-log');
+      const cancelBtn = el.querySelector('.cancel-btn');
+
+      attachThumberLogScrollBehavior(logEl);
+
+      const isTerminal = ['done', 'error', 'cancelled'].includes(job.status);
+      if (cancelBtn) cancelBtn.style.display = isTerminal ? 'none' : '';
+
+      if (job.status === 'done') {
+        statusEl.className = 'job-status done';
+        const link = job.download_page || '';
+        const lines = [
+          link
+            ? `Done &mdash; <a class="job-link" href="${escHtml(link)}" target="_blank">${escHtml(link)}</a>`
+            : 'Done',
+        ];
+        if (job.stashdb_match && job.stashdb_helper_url) {
+          const m = job.stashdb_match;
+          const sceneTitle = m.title ? escHtml(m.title) : '(StashDB scene)';
+          const algo = m.matched_by ? escHtml(m.matched_by) : 'hash';
+          lines.push(
+            `<div class="job-helper match">` +
+              `<a class="job-link" href="${escHtml(job.stashdb_helper_url)}" target="_blank">` +
+                `&#8594; BBCode helper (already on StashDB, ${algo})` +
+              `</a>` +
+              ` <span class="muted small">${sceneTitle}` +
+              (m.studio ? ` &middot; ${escHtml(m.studio)}` : '') +
+              `</span>` +
+            `</div>`
+          );
+          if (job.stashdb_contribute) {
+            const sc = job.stashdb_contribute;
+            const fpItems = (items) => {
+              if (!items || !items.length) return '';
+              return items.map((it) => {
+                const algo = it.algorithm != null ? escHtml(String(it.algorithm)) : '';
+                const h = it.hash != null ? escHtml(String(it.hash)) : '';
+                return `<span class="stashdb-fp-item"><code>${algo}</code> <span class="stashdb-hash">${h}</span></span>`;
+              }).join('<span class="muted"> · </span>');
+            };
+            const fpRow = (label, items) => {
+              const inner = fpItems(items);
+              if (!inner) return '';
+              return `<div class="stashdb-fp-row"><span class="stashdb-fp-label">${label}</span> ${inner}</div>`;
+            };
+            let contribHtml = '';
+            if (sc.message) {
+              contribHtml += `<div class="stashdb-contrib-msg">${escHtml(sc.message)}</div>`;
+            }
+            contribHtml += fpRow('Submitted', sc.submitted);
+            contribHtml += fpRow('Skipped (already)', sc.skipped_already);
+            contribHtml += fpRow('Declined', sc.rejected_false);
+            if (sc.failed && sc.failed.length) {
+              sc.failed.forEach((f) => {
+                const algo = escHtml(f.algorithm || '');
+                const h = escHtml(f.hash || '');
+                const det = escHtml(f.detail || '');
+                contribHtml += `<div class="stashdb-fp-row stashdb-fp-fail"><code>${algo}</code> <span class="stashdb-hash">${h}</span> — ${det}</div>`;
+              });
+            }
+            if (contribHtml) {
+              lines.push(
+                `<div class="job-helper stashdb-contrib muted small">${contribHtml}</div>`
+              );
+            }
+          }
+        } else if (job.stashdb_helper_url) {
+          lines.push(
+            `<div class="job-helper nomatch">` +
+              `<a class="job-link" href="${escHtml(job.stashdb_helper_url)}" target="_blank">` +
+                `&#8594; Create StashDB draft (prefilled)` +
+              `</a>` +
+              ` <span class="muted small">not on StashDB &mdash; hashes cached</span>` +
+            `</div>`
+          );
+        }
+        if (job.stashdb_check_error) {
+          lines.push(
+            `<div class="job-helper warn"><span class="muted small">` +
+              `StashDB check skipped: ${escHtml(job.stashdb_check_error)}` +
+            `</span></div>`
+          );
+        }
+        if (job.phash_followup_pending) {
+          const hp = job.hash_progress;
+          const es = hp && hp.elapsed_sec != null ? escHtml(String(hp.elapsed_sec)) : '';
+          const bp = hp && hp.budget_pct != null
+            ? ` · ~${escHtml(String(hp.budget_pct))}% of server time budget`
+            : '';
+          const sp = hp && hp.sprite_pct != null ? ` · sprite ${escHtml(String(hp.sprite_pct))}%` : '';
+          const fr = hp && hp.phash_frame != null && hp.phash_frames_total != null
+            ? ` (${escHtml(String(hp.phash_frame))}/${escHtml(String(hp.phash_frames_total))})`
+            : '';
+          const eta = hp && hp.eta_sec != null ? ` · ETA ~${escHtml(String(hp.eta_sec))}s` : '';
+          const fft = hp && hp.ffmpeg_time ? ` · ffmpeg ${escHtml(hp.ffmpeg_time)}` : '';
+          lines.push(
+            `<div class="job-helper muted small">Optional PHASH still running for StashDB contribute…` +
+            (es ? ` ${es}s${bp}${sp}${fr}${eta}${fft}` : '') +
+            `</div>`
+          );
+        }
+        statusEl.innerHTML = lines.join('');
+        barEl.classList.remove('indeterminate');
+        barEl.style.width = '100%';
+        barEl.style.background = 'var(--success)';
+        detailEl.textContent = '';
+        if (job.phash_followup_pending && job.hash_progress && job.hash_progress.algorithm === 'PHASH') {
+          const hp = job.hash_progress;
+          const el = hp.elapsed_sec != null ? `${hp.elapsed_sec}s` : '…';
+          const bud = hp.budget_sec != null ? ` / ${hp.budget_sec}s max` : '';
+          const bpt = hp.budget_pct != null ? ` (~${hp.budget_pct}% time budget)` : '';
+          const sp = hp.sprite_pct != null ? ` · sprite ${hp.sprite_pct}%` : '';
+          const fr = hp.phash_frame != null && hp.phash_frames_total != null
+            ? ` (${hp.phash_frame}/${hp.phash_frames_total})`
+            : '';
+          const eta = hp.eta_sec != null ? ` · ETA ~${hp.eta_sec}s` : '';
+          const fft = hp.ffmpeg_time ? ` · ffmpeg ${hp.ffmpeg_time}` : '';
+          detailEl.textContent = `PHASH: ${el}${bud}${bpt}${sp}${fr}${eta}${fft}`;
+        }
+      } else if (job.status === 'error') {
+        statusEl.className = 'job-status error';
+        statusEl.textContent = 'Error: ' + (job.error || 'unknown');
+        barEl.classList.remove('indeterminate');
+        barEl.style.width = '100%';
+        barEl.style.background = 'var(--error)';
+        detailEl.textContent = '';
+      } else if (job.status === 'cancelled') {
+        statusEl.className = 'job-status cancelled';
+        statusEl.textContent = 'Cancelled';
+        barEl.classList.remove('indeterminate');
+        barEl.style.width = '0%';
+        barEl.style.background = 'var(--warn)';
+        detailEl.textContent = '';
+      } else if (job.status === 'queued') {
+        statusEl.className = 'job-status queued';
+        statusEl.textContent = job.status_text || 'Queued...';
+        barEl.classList.remove('indeterminate');
+        barEl.style.width = '0%';
+        barEl.style.background = 'var(--accent)';
+        detailEl.textContent = '';
+      } else {
+        statusEl.className = 'job-status';
+        statusEl.textContent = job.status_text || job.status;
+
+        const p = job.progress;
+        if (p && p.type === 'upload' && p.percent !== undefined) {
+          barEl.classList.remove('indeterminate');
+          barEl.style.background = 'var(--accent)';
+          barEl.style.width = p.percent + '%';
+          const parts = [];
+          if (p.uploaded_fmt && p.total_fmt) parts.push(`${p.uploaded_fmt} / ${p.total_fmt}`);
+          if (p.speed_fmt) parts.push(p.speed_fmt);
+          if (p.eta !== undefined && p.eta > 0) parts.push(`ETA ${p.eta}s`);
+          if (p.folder_name) parts.push(`Folder: ${p.folder_name}`);
+          detailEl.textContent = parts.join('  ·  ');
+        } else if (p && p.type === 'download') {
+          barEl.style.background = 'var(--accent)';
+          if (p.percent !== undefined && p.percent >= 0) {
+            barEl.classList.remove('indeterminate');
+            barEl.style.width = p.percent + '%';
+          } else {
+            barEl.classList.add('indeterminate');
+          }
+          const parts = [];
+          if (p.downloaded_fmt && p.total_fmt) parts.push(`${p.downloaded_fmt} / ${p.total_fmt}`);
+          else if (p.downloaded_fmt) parts.push(p.downloaded_fmt);
+          if (p.files) parts.push(`${p.files} file${p.files !== 1 ? 's' : ''}`);
+          if (p.speed_fmt) parts.push(p.speed_fmt);
+          if (p.eta !== undefined && p.eta >= 0) parts.push(`ETA ${p.eta}s`);
+          detailEl.textContent = parts.join('  ·  ');
+        } else {
+          barEl.classList.add('indeterminate');
+          barEl.style.background = 'var(--accent)';
+          detailEl.textContent = '';
+        }
+        const hp = job.hash_progress;
+        if (hp && hp.algorithm === 'PHASH') {
+          const el = hp.elapsed_sec != null ? `${hp.elapsed_sec}s` : '…';
+          const bud = hp.budget_sec != null ? ` / ${hp.budget_sec}s max` : '';
+          const bpt = hp.budget_pct != null ? ` (~${hp.budget_pct}% of time budget)` : '';
+          const sp = hp.sprite_pct != null ? ` · sprite ${hp.sprite_pct}%` : '';
+          const fr = hp.phash_frame != null && hp.phash_frames_total != null
+            ? ` (${hp.phash_frame}/${hp.phash_frames_total})`
+            : '';
+          const eta = hp.eta_sec != null ? ` · ETA ~${hp.eta_sec}s` : '';
+          const fft = hp.ffmpeg_time ? ` · ffmpeg time=${escHtml(hp.ffmpeg_time)}` : '';
+          let tail = (hp.stderr_tail || '').trim();
+          if (tail.length > 100) tail = tail.slice(-99) + '…';
+          const extra = `PHASH: ${el}${bud}${bpt}${sp}${fr}${eta}${fft}` + (tail ? ` · ${escHtml(tail)}` : '');
+          if (detailEl.textContent) detailEl.textContent = detailEl.textContent + '  |  ' + extra;
+          else detailEl.textContent = extra;
+        }
+      }
+
+      const jobLogs = Array.isArray(job.job_logs) ? job.job_logs : [];
+      const thumberLogs = Array.isArray(job.thumber_logs) ? job.thumber_logs : [];
+      const logs = [...jobLogs, ...thumberLogs];
+      if (logs.length) {
+        logEl.style.display = 'block';
+        const follow = logEl.dataset.thumberFollow !== '0';
+        const prevST = logEl.scrollTop;
+        const prevSH = logEl.scrollHeight;
+        logEl.textContent = logs.slice(-22).join('\n');
+        requestAnimationFrame(() => {
+          if (follow) {
+            logEl.dataset.thumberFollow = '1';
+            logEl.scrollTop = logEl.scrollHeight;
+          } else {
+            const d = logEl.scrollHeight - prevSH;
+            const max = Math.max(0, logEl.scrollHeight - logEl.clientHeight);
+            logEl.scrollTop = Math.max(0, Math.min(max, prevST + d));
+          }
+        });
+      } else {
+        logEl.style.display = 'none';
+        logEl.textContent = '';
+        logEl.dataset.thumberFollow = '';
+      }
+    }
+
+    async function cancelJob(jobId) {
+      try {
+        await api(`/api/job/${jobId}/cancel`, {});
+      } catch (e) {
+        alert('Cancel failed: ' + e.message);
+      }
+    }
+
+    async function refreshJobs() {
+      if (jobsPollInFlight) return false;
+      jobsPollInFlight = true;
+      try {
+        const allJobs = await apiGet('/api/jobs');
+        const entries = sortedJobEntries(allJobs);
+        let hasActiveJobs = false;
+        let hasLiveThumber = false;
+        let hasPhashFollowup = false;
+        for (const [id, job] of entries) {
+          renderJob(id, job);
+          const active =
+            !['done', 'error', 'cancelled'].includes(job.status) ||
+            job.phash_followup_pending;
+          if (active) hasActiveJobs = true;
+          if (job.phash_followup_pending) hasPhashFollowup = true;
+          if (
+            active &&
+            job.status === 'processing' &&
+            job.progress &&
+            job.progress.type === 'thumber'
+          ) {
+            hasLiveThumber = true;
+          }
+        }
+        reorderJobsInDom(entries.map(([id]) => id));
+        if (hasLiveThumber || hasPhashFollowup) return 400;
+        if (hasActiveJobs) return 1200;
+        return 2500;
+      } catch (e) {
+        console.error('[gofup] Failed to load jobs:', e);
+        return 2000;
+      } finally {
+        jobsPollInFlight = false;
+      }
+    }
+
+    function scheduleJobsRefresh(delayMs = 200) {
+      if (jobsPollTimer) clearTimeout(jobsPollTimer);
+      jobsPollTimer = setTimeout(async () => {
+        const nextDelay = await refreshJobs();
+        scheduleJobsRefresh(nextDelay);
+      }, delayMs);
+    }
+
+    // ── GoFile folders ────────────────────
+    async function loadGofileFolders(selectId) {
+      const sel = document.getElementById('folder-select');
+      try {
+        const data = await apiGet('/api/gofile_folders');
+        const prev = selectId || sel.value;
+        sel.innerHTML = '<option value="">Root (default)</option>';
+        for (const f of (data.folders || [])) {
+          const opt = document.createElement('option');
+          opt.value = f.id;
+          opt.textContent = f.name;
+          sel.appendChild(opt);
+        }
+        if (prev) sel.value = prev;
+      } catch (e) { console.error('[gofup] Failed to load GoFile folders:', e); }
+    }
+
+    document.getElementById('create-folder-btn').addEventListener('click', async () => {
+      const name = document.getElementById('new-folder-name').value.trim();
+      if (!name) { alert('Enter a folder name.'); return; }
+      const parentId = document.getElementById('folder-select').value || '';
+      const btn = document.getElementById('create-folder-btn');
+      btn.disabled = true;
+      try {
+        const data = await api('/api/gofile_create_folder', { name, parent_id: parentId });
+        document.getElementById('new-folder-name').value = '';
+        await loadGofileFolders(data.id);
+      } catch (e) { alert('Failed to create folder: ' + e.message); }
+      btn.disabled = false;
+    });
+
+    document.getElementById('add-folder-btn').addEventListener('click', async () => {
+      const folderId = document.getElementById('existing-folder-id').value.trim();
+      const name = document.getElementById('existing-folder-name').value.trim() || folderId.substring(0, 8);
+      if (!folderId) { alert('Enter a folder ID.'); return; }
+      const btn = document.getElementById('add-folder-btn');
+      btn.disabled = true;
+      try {
+        const data = await api('/api/gofile_add_folder', { folder_id: folderId, name });
+        document.getElementById('existing-folder-id').value = '';
+        document.getElementById('existing-folder-name').value = '';
+        await loadGofileFolders(data.id);
+      } catch (e) { alert('Failed to add folder: ' + e.message); }
+      btn.disabled = false;
+    });
+
+    function getSelectedFolderId() {
+      return document.getElementById('folder-select').value || '';
+    }
+
+    // ── Actions ───────────────────────────
+    document.getElementById('link-btn').addEventListener('click', async () => {
+      const url = document.getElementById('link-input').value.trim();
+      if (!url) { alert('No URL entered.'); return; }
+      const btn = document.getElementById('link-btn');
+      btn.disabled = true;
+      try {
+        const data = await api('/api/submit_link', {
+          url,
+          folder_id: getSelectedFolderId(),
+        });
+        renderJob(data.job_id, {
+          title: `Link: ${url.substring(0, 80)}`,
+          status: 'queued',
+          status_text: 'Queued...',
+          progress: null,
+          folder_name: getSelectedFolderLabel(),
+          queued_at: data.queued_at,
+        });
+        await refreshJobs();
+        scheduleJobsRefresh(120);
+        document.getElementById('link-input').value = '';
+      } catch (e) { alert('Failed: ' + e.message); }
+      btn.disabled = false;
+    });
+
+    document.getElementById('upload-btn').addEventListener('click', async () => {
+      const path = document.getElementById('path-input').value.trim() || selectedPath;
+      if (!path) { alert('No file selected. Click a file or type a path first.'); return; }
+      const btn = document.getElementById('upload-btn');
+      btn.disabled = true;
+      try {
+        const data = await api('/api/upload_path', {
+          path,
+          folder_id: getSelectedFolderId(),
+        });
+        renderJob(data.job_id, {
+          title: `File: ${path.split('/').pop()}`,
+          status: 'queued',
+          status_text: 'Queued...',
+          progress: null,
+          folder_name: getSelectedFolderLabel(),
+          queued_at: data.queued_at,
+        });
+        await refreshJobs();
+        scheduleJobsRefresh(120);
+      } catch (e) { alert('Upload failed: ' + e.message); }
+      btn.disabled = false;
+    });
+
+    function getSelectedFolderLabel() {
+      const sel = document.getElementById('folder-select');
+      const opt = sel.options[sel.selectedIndex];
+      return opt ? opt.textContent : 'Root';
+    }
+
+    async function exportQueue(download) {
+      try {
+        const data = await apiGet('/api/queue/export');
+        const text = JSON.stringify(data, null, 2);
+        if (download) {
+          const blob = new Blob([text], { type: 'application/json' });
+          const a = document.createElement('a');
+          a.href = URL.createObjectURL(blob);
+          a.download = `gofup-queue-${new Date().toISOString().slice(0, 19).replace(/:/g, '')}.json`;
+          a.click();
+          URL.revokeObjectURL(a.href);
+          return;
+        }
+        await navigator.clipboard.writeText(text);
+        alert(`Copied ${data.pending_count || 0} queued item(s) to clipboard.`);
+      } catch (e) {
+        alert('Queue export failed: ' + e.message);
+      }
+    }
+
+    async function loadProviderConfig() {
+      try {
+        const cfg = await apiGet('/api/upload_config');
+        const label = cfg.label || 'Upload';
+        document.title = `gofup — ${label}`;
+        document.getElementById('provider-subtitle').innerHTML =
+          `Upload to ${label} &mdash; from link or file`;
+        document.getElementById('destination-title').textContent = `${label} Destination`;
+        document.getElementById('upload-btn').textContent = `Upload to ${label}`;
+      } catch (e) { console.error('[gofup] Failed to load provider config:', e); }
+    }
+
+    document.getElementById('export-queue-btn').addEventListener('click', () => exportQueue(true));
+    document.getElementById('copy-queue-btn').addEventListener('click', () => exportQueue(false));
+
+    // ── Init ──────────────────────────────
+    loadProviderConfig();
+    browse('/downloads');
+    refreshJobs().then((nextDelay) => scheduleJobsRefresh(nextDelay));
+    loadGofileFolders();
+  </script>
+</body>
+</html>

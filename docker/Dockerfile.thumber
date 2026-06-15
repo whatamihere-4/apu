@@ -1,0 +1,19 @@
+FROM alpine:3.20
+
+# ffmpeg: decode/encode/filters; bash: thumbs script; ttf-dejavu: drawtext fonts; python3: HTTP API
+RUN apk add --no-cache \
+    bash \
+    ffmpeg \
+    python3 \
+    ttf-dejavu
+
+COPY scripts/thumbs.sh /usr/local/bin/thumbs
+RUN chmod +x /usr/local/bin/thumbs
+
+RUN mkdir -p /usr/local/lib/thumber
+COPY py/thumber_http.py /usr/local/lib/thumber/thumber_http.py
+
+WORKDIR /work
+
+# CLI: docker compose run thumber …  |  HTTP: override entrypoint to thumber_http.py in compose.
+ENTRYPOINT ["/bin/bash", "/usr/local/bin/thumbs"]

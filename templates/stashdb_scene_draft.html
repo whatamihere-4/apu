@@ -1,0 +1,1176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>StashDB Scene Draft</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    :root {
+      --bg: #0e0e10;
+      --surface: #18181b;
+      --border: #2d2d33;
+      --accent: #6d5dfc;
+      --accent-hover: #8577fd;
+      --text: #e4e4e7;
+      --muted: #71717a;
+      --success: #22c55e;
+      --error: #ef4444;
+      --warn: #f59e0b;
+      --radius: 10px;
+    }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      padding: 2rem 1rem;
+      display: flex;
+      justify-content: center;
+    }
+    .page { width: 100%; max-width: 1100px; }
+    h1 { margin: 0 0 0.3rem; font-size: 1.8rem; letter-spacing: -0.02em; }
+    .subtitle { margin: 0 0 1.4rem; color: var(--muted); font-size: 0.92rem; }
+    .layout { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; align-items: start; }
+    @media (max-width: 980px) { .layout { grid-template-columns: 1fr; } }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1rem;
+    }
+    .card h2 {
+      margin: 0 0 0.9rem;
+      font-size: 1rem;
+      font-weight: 600;
+    }
+    .field { margin-bottom: 0.8rem; }
+    .row { display: flex; gap: 0.5rem; align-items: end; }
+    .row .field { flex: 1; margin-bottom: 0; }
+
+    label {
+      display: block;
+      margin-bottom: 0.35rem;
+      font-size: 0.78rem;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    input[type="text"], input[type="url"], textarea {
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 0.9rem;
+      padding: 0.62rem 0.75rem;
+      outline: none;
+      font-family: inherit;
+    }
+    textarea { resize: vertical; min-height: 86px; line-height: 1.35; }
+    input:focus, textarea:focus { border-color: var(--accent); }
+
+    .perf-header {
+      display: flex; justify-content: space-between; align-items: center;
+      margin-bottom: 0.45rem;
+    }
+    .perf-title {
+      font-size: 0.78rem; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted);
+    }
+    .btn-icon {
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--text);
+      width: 28px; height: 28px;
+      border-radius: 6px; cursor: pointer;
+      font-size: 1rem; line-height: 1;
+    }
+    .btn-icon:hover { border-color: var(--accent); }
+    .perf-list { display: flex; flex-direction: column; gap: 0.45rem; margin-bottom: 0.85rem; }
+    .perf-row { display: grid; grid-template-columns: 1fr auto; gap: 0.45rem; align-items: center; }
+    .perf-row .remove-btn {
+      border-color: rgba(239, 68, 68, 0.45);
+      color: #fecaca;
+    }
+    .perf-row .remove-btn:hover {
+      border-color: var(--error);
+      color: #fff;
+      background: rgba(239, 68, 68, 0.2);
+    }
+
+    .btn {
+      border: none;
+      border-radius: 6px;
+      padding: 0.55rem 0.95rem;
+      font-size: 0.85rem;
+      font-weight: 600;
+      background: var(--accent);
+      color: #fff;
+      cursor: pointer;
+    }
+    .btn:hover { background: var(--accent-hover); }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn.secondary {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text);
+    }
+    .btn.secondary:hover { border-color: var(--accent); color: var(--accent-hover); }
+    .btn.danger {
+      background: transparent;
+      border: 1px solid rgba(239, 68, 68, 0.5);
+      color: #fecaca;
+    }
+    .btn.danger:hover { background: rgba(239, 68, 68, 0.2); color: #fff; }
+
+    .status { font-size: 0.82rem; color: var(--muted); margin-top: 0.4rem; min-height: 1.1em; }
+    .status.ok { color: var(--success); }
+    .status.warn { color: var(--warn); }
+    .status.err { color: var(--error); }
+
+    .hash-line {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 0.45rem 0.65rem;
+      font-size: 0.82rem;
+      color: var(--text);
+      word-break: break-all;
+    }
+    .muted { color: var(--muted); font-size: 0.8rem; }
+    .small { font-size: 0.78rem; }
+
+    .match-list { display: flex; flex-direction: column; gap: 0.5rem; margin-top: 0.4rem; }
+    .match {
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 0.55rem 0.7rem;
+      background: var(--bg);
+      font-size: 0.85rem;
+    }
+    .match.url-overlap { border-color: rgba(239, 68, 68, 0.55); }
+    .match.fingerprint { border-color: rgba(245, 158, 11, 0.55); }
+    .match a { color: var(--accent); text-decoration: none; word-break: break-all; }
+    .match a:hover { text-decoration: underline; }
+    .badge {
+      display: inline-block;
+      font-size: 0.65rem;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      padding: 1px 6px;
+      border-radius: 3px;
+      margin-left: 0.4rem;
+      vertical-align: middle;
+    }
+    .badge.url { background: rgba(239, 68, 68, 0.2); color: #fecaca; }
+    .badge.fp { background: rgba(245, 158, 11, 0.18); color: #fde68a; }
+
+    .file-row {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 0.45rem;
+      align-items: center;
+    }
+    .file-list {
+      max-height: 220px;
+      overflow-y: auto;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--bg);
+      margin-top: 0.4rem;
+    }
+    .file-item {
+      display: flex; gap: 0.5rem; align-items: center;
+      padding: 0.4rem 0.7rem;
+      border-bottom: 1px solid var(--border);
+      cursor: pointer;
+      font-size: 0.85rem;
+    }
+    .file-item:last-child { border-bottom: none; }
+    .file-item:hover { background: rgba(109, 93, 252, 0.08); }
+    .file-item.selected { background: rgba(109, 93, 252, 0.15); }
+    .file-item .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .file-item .sz { color: var(--muted); font-size: 0.72rem; }
+
+    .toggle-row {
+      display: flex; align-items: center; gap: 0.5rem;
+      font-size: 0.8rem; color: var(--muted);
+      margin-top: 0.4rem;
+    }
+
+    .step-list { display: flex; flex-direction: column; gap: 0.35rem; }
+    .step {
+      display: grid;
+      grid-template-columns: 90px 1fr auto;
+      gap: 0.5rem;
+      align-items: center;
+      padding: 0.35rem 0.6rem;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--bg);
+      font-size: 0.82rem;
+    }
+    .step .label {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+    }
+    .step .detail { color: var(--muted); font-size: 0.78rem; word-break: break-all; }
+    .step .pill {
+      font-size: 0.7rem;
+      padding: 1px 8px;
+      border-radius: 99px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .step.running { border-color: rgba(109,93,252,0.55); }
+    .step.running .pill { background: rgba(109,93,252,0.18); color: #c7c1ff; }
+    .step.miss { border-color: rgba(34,197,94,0.4); }
+    .step.miss .pill { background: rgba(34,197,94,0.18); color: #bbf7d0; }
+    .step.match { border-color: rgba(245,158,11,0.55); }
+    .step.match .pill { background: rgba(245,158,11,0.22); color: #fde68a; }
+    .step.error { border-color: rgba(239,68,68,0.55); }
+    .step.error .pill { background: rgba(239,68,68,0.22); color: #fecaca; }
+    .step.skipped { opacity: 0.7; }
+    .step.skipped .pill { background: var(--surface); color: var(--muted); }
+
+    nav {
+      margin-bottom: 1.4rem;
+      display: flex;
+      gap: 0.75rem;
+      font-size: 0.85rem;
+    }
+    nav a { color: var(--muted); text-decoration: none; }
+    nav a:hover { color: var(--accent); }
+    nav .active { color: var(--text); font-weight: 600; }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <nav>
+      <a href="/">gofup</a>
+      <span class="muted">·</span>
+      <a href="/bbcode">BBCode</a>
+      <span class="muted">·</span>
+      <a class="active" href="/stashdb-scene-draft">StashDB Draft</a>
+    </nav>
+
+    <h1>StashDB Scene Draft Submit</h1>
+    <p class="subtitle">
+      Submit a missing scene to StashDB as a draft. Always run <strong>Check StashDB</strong> first;
+      drafts must still be reviewed and submitted on StashDB itself.
+    </p>
+
+    <div class="layout">
+      <!-- LEFT: scene details -->
+      <section class="card">
+        <h2>Scene Details</h2>
+
+        <div class="field">
+          <label for="title">Title</label>
+          <input type="text" id="title" placeholder="Scene title">
+        </div>
+
+        <div class="row">
+          <div class="field">
+            <label for="date">Date (YYYY-MM-DD)</label>
+            <input type="text" id="date" placeholder="2024-05-01">
+          </div>
+          <div class="field">
+            <label for="studio">Studio</label>
+            <input type="text" id="studio" placeholder="Studio name">
+          </div>
+        </div>
+
+        <div class="perf-header">
+          <div class="perf-title">Performers</div>
+          <button type="button" class="btn-icon" id="add-perf-btn" title="Add performer">+</button>
+        </div>
+        <div class="perf-list" id="perf-list"></div>
+
+        <div class="field">
+          <label for="urls">Scene URL(s) — one per line, official studio/product page</label>
+          <textarea id="urls" placeholder="https://studio.com/scene/12345"></textarea>
+        </div>
+
+        <div class="row">
+          <div class="field">
+            <label for="director">Director (optional)</label>
+            <input type="text" id="director" placeholder="">
+          </div>
+          <div class="field">
+            <label for="code">Code (optional)</label>
+            <input type="text" id="code" placeholder="">
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="details">Details (optional)</label>
+          <textarea id="details" placeholder="Synopsis or notes for the draft"></textarea>
+        </div>
+      </section>
+
+      <!-- RIGHT: auto-detect + submit -->
+      <section class="card">
+        <h2>Auto-detect &amp; Submit</h2>
+        <p class="muted small" style="margin-top:-0.4rem; margin-bottom:0.8rem;">
+          Tries StashDB by <strong>OSHASH</strong> (fast) → <strong>MD5</strong> (medium) →
+          <strong>PHASH</strong> (slow). Stops on the first match — no draft is created
+          if any algorithm hits.
+        </p>
+
+        <div class="field">
+          <label>File in /downloads (basename only — same mount as hasher)</label>
+          <div class="file-row">
+            <input type="text" id="fp-filename" placeholder="myvideo.mp4">
+            <button type="button" class="btn secondary" id="fp-browse-btn">Browse</button>
+          </div>
+          <div id="fp-file-list" class="file-list" style="display:none;"></div>
+        </div>
+
+        <div class="row">
+          <button type="button" class="btn" id="run-auto-btn">Auto-check &amp; Submit</button>
+          <button type="button" class="btn secondary" id="run-detect-btn">Detect only</button>
+          <button type="button" class="btn secondary" id="fp-clear-btn">Clear</button>
+        </div>
+
+        <div class="toggle-row">
+          <input type="checkbox" id="skip-phash">
+          <label for="skip-phash" style="margin:0; text-transform:none; letter-spacing:normal; color:var(--text);">
+            Skip PHASH (fast batch pass — OSHASH/MD5 only)
+          </label>
+        </div>
+
+        <div id="auto-status" class="status"></div>
+
+        <div class="step-list" id="step-list" style="display:none; margin-top:0.6rem;"></div>
+
+        <hr style="margin: 1rem 0; border: none; border-top: 1px solid var(--border);">
+
+        <details style="margin-bottom: 0.6rem;">
+          <summary class="muted small" style="cursor:pointer;">Computed fingerprints</summary>
+          <div class="field" style="margin-top: 0.4rem;">
+            <label>OSHASH</label>
+            <div id="hash-oshash" class="hash-line muted">—</div>
+          </div>
+          <div class="field">
+            <label>MD5</label>
+            <div id="hash-md5" class="hash-line muted">—</div>
+          </div>
+          <div class="field">
+            <label>PHASH</label>
+            <div id="hash-phash" class="hash-line muted">—</div>
+          </div>
+          <div class="row">
+            <div class="field">
+              <label>Duration (sec)</label>
+              <input type="text" id="fp-duration" placeholder="0">
+            </div>
+          </div>
+        </details>
+
+        <div class="match-list" id="matches"></div>
+
+        <div class="toggle-row" id="override-row" style="display:none;">
+          <input type="checkbox" id="confirm-override">
+          <label for="confirm-override" style="margin:0; text-transform:none; letter-spacing:normal; color:var(--text);">
+            I checked these candidates and still want to submit a draft.
+          </label>
+        </div>
+
+        <div id="submit-status" class="status"></div>
+      </section>
+    </div>
+  </div>
+
+  <script>
+    const perfList = document.getElementById("perf-list");
+    const addPerfBtn = document.getElementById("add-perf-btn");
+    const fields = {
+      title: document.getElementById("title"),
+      date: document.getElementById("date"),
+      studio: document.getElementById("studio"),
+      urls: document.getElementById("urls"),
+      director: document.getElementById("director"),
+      code: document.getElementById("code"),
+      details: document.getElementById("details"),
+    };
+    const fpFilename = document.getElementById("fp-filename");
+    const fpDuration = document.getElementById("fp-duration");
+    const fpClearBtn = document.getElementById("fp-clear-btn");
+    const fpBrowseBtn = document.getElementById("fp-browse-btn");
+    const fpFileListEl = document.getElementById("fp-file-list");
+
+    const hashFields = {
+      OSHASH: document.getElementById("hash-oshash"),
+      MD5: document.getElementById("hash-md5"),
+      PHASH: document.getElementById("hash-phash"),
+    };
+
+    const runAutoBtn = document.getElementById("run-auto-btn");
+    const runDetectBtn = document.getElementById("run-detect-btn");
+    const skipPhashChk = document.getElementById("skip-phash");
+    const autoStatus = document.getElementById("auto-status");
+    const stepListEl = document.getElementById("step-list");
+    const matchesEl = document.getElementById("matches");
+    const overrideRow = document.getElementById("override-row");
+    const overrideChk = document.getElementById("confirm-override");
+    const submitStatus = document.getElementById("submit-status");
+
+    /** When set, pipeline runs OSHASH-only (remote Range hash — no local file). */
+    let stickyRemoteOshash = null;
+    let stickyRemoteMd5 = null;
+    /** Remote hash tools cached OSHASH+PHASH(+MD5) under a stable basename — no local file. */
+    let stickyRemoteBundle = false;
+
+    // Hashes the server already knows about for the currently-selected file.
+    // Pre-populated from /api/cached_scene on page load (and refreshed during
+    // a pipeline run). Algorithms whose hash is here are skipped during compute.
+    let cachedHashes = {};
+
+    function escAttr(v) {
+      return String(v ?? "").replace(/&/g, "&amp;").replace(/"/g, "&quot;");
+    }
+    function esc(v) {
+      const d = document.createElement("div");
+      d.textContent = String(v ?? "");
+      return d.innerHTML;
+    }
+
+    function addPerfRow(name = "") {
+      const row = document.createElement("div");
+      row.className = "perf-row";
+      row.innerHTML = `
+        <input type="text" class="perf-name" placeholder="Performer name" value="${escAttr(name)}">
+        <button type="button" class="btn-icon remove-btn" title="Remove">x</button>
+      `;
+      row.querySelector(".remove-btn").addEventListener("click", () => {
+        row.remove();
+        updatePerfRowState();
+      });
+      perfList.appendChild(row);
+      updatePerfRowState();
+    }
+    function updatePerfRowState() {
+      const rows = perfList.querySelectorAll(".perf-row");
+      rows.forEach((row, idx) => {
+        row.querySelector(".remove-btn").style.display = idx === 0 ? "none" : "inline-flex";
+      });
+    }
+    addPerfBtn.addEventListener("click", () => addPerfRow());
+    addPerfRow();
+
+    function getPerformers() {
+      return Array.from(perfList.querySelectorAll(".perf-name"))
+        .map((el) => el.value.trim())
+        .filter((v) => v.length > 0);
+    }
+    function getUrls() {
+      return (fields.urls.value || "")
+        .split(/\r?\n|,|;/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+    }
+
+    function clearFingerprints() {
+      for (const el of Object.values(hashFields)) {
+        el.textContent = "—";
+        el.classList.add("muted");
+      }
+      fpDuration.value = "";
+      cachedHashes = {};
+    }
+    function setHashField(algo, value) {
+      const el = hashFields[algo];
+      if (!el) return;
+      el.textContent = value || "—";
+      el.classList.toggle("muted", !value);
+    }
+    function setStatus(el, level, text) {
+      el.className = "status" + (level ? " " + level : "");
+      el.textContent = text || "";
+    }
+    function clearSteps() {
+      stepListEl.innerHTML = "";
+      stepListEl.style.display = "none";
+    }
+    function pushStep(label, detail = "", state = "running") {
+      stepListEl.style.display = "flex";
+      const node = document.createElement("div");
+      node.className = "step " + state;
+      node.dataset.label = label;
+      node.innerHTML = `
+        <div class="label">${esc(label)}</div>
+        <div class="detail">${esc(detail)}</div>
+        <div class="pill">${esc(state)}</div>
+      `;
+      stepListEl.appendChild(node);
+      return node;
+    }
+    function updateStep(node, { state, detail }) {
+      if (state) {
+        node.classList.remove("running", "miss", "match", "error", "skipped");
+        node.classList.add(state);
+        node.querySelector(".pill").textContent = state;
+      }
+      if (detail !== undefined) {
+        node.querySelector(".detail").textContent = detail;
+      }
+    }
+
+    fpClearBtn.addEventListener("click", () => {
+      clearFingerprints();
+      clearSteps();
+      matchesEl.innerHTML = "";
+      overrideRow.style.display = "none";
+      overrideChk.checked = false;
+      setStatus(autoStatus, "", "");
+      setStatus(submitStatus, "", "");
+    });
+
+    async function loadDownloadsList(dir = "/downloads") {
+      try {
+        const r = await fetch(`/api/browse?path=${encodeURIComponent(dir)}`);
+        const data = await r.json();
+        const entries = (data.entries || [])
+          .filter((e) => !e.is_dir)
+          .sort((a, b) => a.name.localeCompare(b.name));
+        if (entries.length === 0) {
+          fpFileListEl.innerHTML = '<div style="padding:0.6rem;color:var(--muted);font-size:0.85rem;">No files in /downloads</div>';
+        } else {
+          fpFileListEl.innerHTML = entries
+            .map((e) => `<div class="file-item" data-name="${escAttr(e.name)}">
+              <span class="nm">${esc(e.name)}</span>
+              <span class="sz">${formatSize(e.size)}</span>
+            </div>`)
+            .join("");
+          fpFileListEl.querySelectorAll(".file-item").forEach((el) => {
+            el.addEventListener("click", () => {
+              fpFileListEl.querySelectorAll(".file-item").forEach((x) => x.classList.remove("selected"));
+              el.classList.add("selected");
+              fpFilename.value = el.dataset.name;
+            });
+          });
+        }
+        fpFileListEl.style.display = "block";
+      } catch (err) {
+        setStatus(autoStatus, "err", "Failed to list /downloads: " + err.message);
+      }
+    }
+    function formatSize(b) {
+      if (!b) return "";
+      const u = ["B", "KB", "MB", "GB", "TB"];
+      const i = Math.floor(Math.log(b) / Math.log(1024));
+      return (b / Math.pow(1024, i)).toFixed(1) + " " + u[i];
+    }
+    fpBrowseBtn.addEventListener("click", () => {
+      if (fpFileListEl.style.display === "none" || !fpFileListEl.style.display) {
+        loadDownloadsList();
+      } else {
+        fpFileListEl.style.display = "none";
+      }
+    });
+
+    function gatherDraftPayload() {
+      return {
+        title: fields.title.value.trim(),
+        date: fields.date.value.trim(),
+        studio: fields.studio.value.trim(),
+        performers: getPerformers(),
+        urls: getUrls(),
+        director: fields.director.value.trim(),
+        code: fields.code.value.trim(),
+        details: fields.details.value.trim(),
+      };
+    }
+
+    function renderHashMatch(algo, scene) {
+      matchesEl.innerHTML = "";
+      const performersLine = (scene.performers || []).join(", ");
+      const urlList = (scene.urls || []).slice(0, 3)
+        .map((u) => `<a href="${escAttr(u)}" target="_blank" rel="noopener">${esc(u)}</a>`)
+        .join("<br>");
+      const dateText = scene.date ? ` · ${esc(scene.date)}` : "";
+      const studio = scene.studio ? ` · ${esc(scene.studio)}` : "";
+      matchesEl.innerHTML = `<div class="match fingerprint">
+        <div><strong>${esc(scene.title || "(no title)")}${dateText}${studio}</strong>
+          <span class="badge fp">${esc(algo)} match</span></div>
+        ${performersLine ? `<div class="muted small">${esc(performersLine)}</div>` : ""}
+        <div class="small" style="margin-top:0.3rem;">
+          <a href="${escAttr(scene.link)}" target="_blank" rel="noopener">${esc(scene.link)}</a>
+        </div>
+        ${urlList ? `<div class="muted small" style="margin-top:0.25rem;">${urlList}</div>` : ""}
+      </div>`;
+    }
+
+    function renderUrlMatches(items) {
+      const filtered = (items || []).filter((m) => (m.url_overlap || []).length > 0);
+      if (!filtered.length) return;
+      matchesEl.innerHTML = filtered.map((m) => {
+        const performersLine = (m.performers || []).join(", ");
+        const dateText = m.date ? ` · ${esc(m.date)}` : "";
+        const studio = m.studio ? ` · ${esc(m.studio)}` : "";
+        return `<div class="match url-overlap">
+          <div><strong>${esc(m.title || "(no title)")}${dateText}${studio}</strong>
+            <span class="badge url">URL match</span></div>
+          ${performersLine ? `<div class="muted small">${esc(performersLine)}</div>` : ""}
+          <div class="small" style="margin-top:0.3rem;">
+            <a href="${escAttr(m.link)}" target="_blank" rel="noopener">${esc(m.link)}</a>
+          </div>
+        </div>`;
+      }).join("");
+    }
+
+    async function postJson(url, body) {
+      const r = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      let data;
+      try { data = await r.json(); }
+      catch { data = { error: `HTTP ${r.status} (non-JSON response)` }; }
+      return { ok: r.ok, status: r.status, data };
+    }
+
+    async function streamHasherHash(filename, algorithm, stepNode) {
+      const r = await fetch('/api/hasher_hash_stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename, algorithm }),
+      });
+      if (!r.ok) {
+        const t = await r.text();
+        throw new Error(`HTTP ${r.status}: ${t.slice(0, 400)}`);
+      }
+      const reader = r.body.getReader();
+      const dec = new TextDecoder();
+      let buf = '';
+      let result = null;
+      while (true) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        buf += dec.decode(chunk.value, { stream: true });
+        let nl;
+        while ((nl = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, nl).trim();
+          buf = buf.slice(nl + 1);
+          if (!line) continue;
+          let ev;
+          try { ev = JSON.parse(line); } catch (e) { continue; }
+          if (ev.type === 'progress' && ev.algorithm === 'MD5' && ev.total_bytes) {
+            const pct = ev.pct != null ? `${Number(ev.pct).toFixed(1)}%` : '';
+            updateStep(stepNode, {
+              detail: `MD5 ${pct} — ${formatSize(ev.read_bytes)} / ${formatSize(ev.total_bytes)}…`,
+            });
+          } else if (ev.type === 'heartbeat' && ev.algorithm === 'PHASH') {
+            let t = `PHASH ${ev.elapsed_sec != null ? ev.elapsed_sec + 's' : ''}`;
+            if (ev.stderr_tail && String(ev.stderr_tail).trim()) {
+              t += ' — ' + String(ev.stderr_tail).replace(/\s+/g, ' ').slice(0, 140);
+            }
+            updateStep(stepNode, { detail: t });
+          } else if (ev.type === 'phase') {
+            updateStep(stepNode, { detail: `${algorithm}: ${String(ev.phase || '').replace(/_/g, ' ')}` });
+          } else if (ev.type === 'result') {
+            result = ev;
+          }
+        }
+      }
+      if (!result || !result.ok) {
+        throw new Error((result && (result.error || result.detail)) || 'hasher returned no result');
+      }
+      return {
+        hash: result.hash,
+        duration_int: result.duration_int,
+        width: result.width,
+        height: result.height,
+      };
+    }
+
+    /**
+     * One algorithm pass:
+     *   1. POST /api/stashdb_video_hash to compute the hash (skipped if cached).
+     *   2. POST /api/stashdb_find_by_fingerprint to ask StashDB about it.
+     * Returns { hash, duration_int, matched, scene? } or throws on hard error.
+     */
+    async function runAlgorithm(filename, algorithm, stepNode) {
+      const t0 = performance.now();
+      let hash = cachedHashes[algorithm.toLowerCase()] || null;
+      let duration_int = cachedHashes.duration_int || null;
+      let computeNote = "";
+
+      if (!hash) {
+        const res = await streamHasherHash(filename, algorithm, stepNode);
+        hash = res.hash;
+        duration_int = res.duration_int || duration_int;
+        const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
+        computeNote = `(computed in ${elapsed}s)`;
+        cachedHashes[algorithm.toLowerCase()] = hash;
+        if (duration_int) cachedHashes.duration_int = duration_int;
+      } else {
+        computeNote = "(cached)";
+      }
+
+      setHashField(algorithm, hash);
+      if (duration_int && !fpDuration.value) fpDuration.value = String(duration_int);
+      updateStep(stepNode, { detail: `${hash}  ${computeNote} — checking StashDB…` });
+
+      const lookupRes = await postJson("/api/stashdb_find_by_fingerprint",
+        { algorithm, hash });
+      if (!lookupRes.ok || lookupRes.data.error) {
+        throw new Error(`${algorithm} lookup: ${lookupRes.data.error || lookupRes.status}`);
+      }
+      if (lookupRes.data.matched) {
+        const scene = (lookupRes.data.matches || [])[0];
+        updateStep(stepNode, {
+          state: "match",
+          detail: `${hash}  →  matched: ${scene.title || scene.link}`,
+        });
+        return { hash, duration_int, matched: true, scene };
+      }
+      updateStep(stepNode, {
+        state: "miss",
+        detail: `${hash}  (no StashDB match)`,
+      });
+      return { hash, duration_int, matched: false };
+    }
+
+    async function runUrlCheck(payload, stepNode) {
+      const r = await postJson("/api/stashdb_check_scene", payload);
+      if (!r.ok || r.data.error) {
+        updateStep(stepNode, {
+          state: "error",
+          detail: r.data.error || `HTTP ${r.status}`,
+        });
+        return { matched: false, errored: true, payload: r.data };
+      }
+      if (r.data.has_url_overlap) {
+        updateStep(stepNode, {
+          state: "match",
+          detail: `URL overlap with: ${(r.data.likely_matches || [])
+            .filter((m) => (m.url_overlap || []).length > 0)
+            .map((m) => m.title)
+            .filter(Boolean)
+            .slice(0, 2)
+            .join(", ") || "existing scene"}`,
+        });
+        return { matched: true, errored: false, payload: r.data };
+      }
+      updateStep(stepNode, { state: "miss", detail: "no URL overlap on StashDB" });
+      return { matched: false, errored: false, payload: r.data };
+    }
+
+    async function submitDraft({ filename, fingerprintsCollected, durationInt }) {
+      const draft = gatherDraftPayload();
+      if (!draft.title) {
+        throw new Error("Title is required to submit a draft.");
+      }
+      if (!durationInt) {
+        throw new Error("Duration unknown — cannot submit fingerprints.");
+      }
+      const fingerprints = fingerprintsCollected.map((fp) => ({
+        algorithm: fp.algorithm, hash: fp.hash, duration: durationInt,
+      }));
+      const payload = {
+        ...draft,
+        fingerprints,
+        confirm_override: overrideRow.style.display === "flex" && overrideChk.checked,
+      };
+      const r = await postJson("/api/stashdb_submit_scene_draft", payload);
+      if (!r.ok || r.data.error) {
+        if (r.status === 409 && r.data.duplicate_check) {
+          renderUrlMatches(r.data.duplicate_check.likely_matches || []);
+          overrideRow.style.display = "flex";
+        }
+        throw new Error(r.data.error || `HTTP ${r.status}`);
+      }
+      return r.data;
+    }
+
+    // Cached hashes from the most recent successful (non-matched) pipeline run.
+    // Used so toggling "confirm override" can submit directly without recomputing.
+    let pendingDraft = null;
+
+    async function contributeMatchedScene(filename, matched, fingerprintsCollected, durationInt) {
+      const sceneId = (matched.scene && matched.scene.id) || '';
+      if (!sceneId) return null;
+      const r = await postJson('/api/stashdb_contribute_matched_scene', {
+        filename,
+        scene_id: sceneId,
+        matched_algo: matched.algorithm,
+        fingerprints: fingerprintsCollected,
+        duration_int: durationInt,
+      });
+      if (!r.ok || r.data.error) {
+        throw new Error(r.data.error || `HTTP ${r.status}`);
+      }
+      return r.data.stashdb_contribute || null;
+    }
+
+    async function runPipeline({ allowSubmit }) {
+      const filename = fpFilename.value.trim();
+      if (!filename) {
+        setStatus(autoStatus, "err", "Pick a file in /downloads first.");
+        return;
+      }
+      runAutoBtn.disabled = true;
+      runDetectBtn.disabled = true;
+      clearFingerprints();
+      matchesEl.innerHTML = "";
+      overrideRow.style.display = "none";
+      overrideChk.checked = false;
+      setStatus(submitStatus, "", "");
+      pendingDraft = null;
+
+      // Pre-warm cachedHashes from the server so runAlgorithm can short-circuit
+      // compute. This may push preview "cached" rows; we wipe them just below
+      // so the run-time step list starts fresh.
+      await loadCachedHashesForFilename(filename);
+      // Remote Range OSHASH — no local file; reload wiped sticky cache.
+      if (stickyRemoteOshash) {
+        cachedHashes.oshash = stickyRemoteOshash;
+        setHashField("OSHASH", stickyRemoteOshash);
+      }
+      if (stickyRemoteMd5) {
+        cachedHashes.md5 = stickyRemoteMd5;
+        setHashField("MD5", stickyRemoteMd5);
+      }
+      clearSteps();
+
+      let algorithms;
+      if (stickyRemoteBundle) {
+        algorithms = [];
+        for (const a of ["OSHASH", "PHASH", "MD5"]) {
+          if (cachedHashes[a.toLowerCase()]) algorithms.push(a);
+        }
+        if (!algorithms.length) {
+          setStatus(
+            autoStatus,
+            "err",
+            "Remote bundle: no OSHASH/PHASH/MD5 in cache for this filename — run /remotehash or /phash first, or paste hashes.",
+          );
+          runAutoBtn.disabled = false;
+          runDetectBtn.disabled = false;
+          return;
+        }
+      } else if (stickyRemoteMd5) {
+        algorithms = ["MD5"];
+      } else if (stickyRemoteOshash) {
+        algorithms = ["OSHASH"];
+      } else {
+        algorithms = ["OSHASH", "MD5"];
+        if (!skipPhashChk.checked) algorithms.push("PHASH");
+      }
+
+      setStatus(autoStatus, "", `Running ${algorithms.join(" → ")}…`);
+
+      const fingerprintsCollected = [];
+      let durationInt = null;
+      let matched = null;
+
+      try {
+        for (const algo of algorithms) {
+          const detailHint = algo === "PHASH"
+            ? "computing pHash (ffmpeg sampling 25 frames — slow)…"
+            : `computing ${algo}…`;
+          const node = pushStep(algo, detailHint, "running");
+          const res = await runAlgorithm(filename, algo, node);
+          if (res.duration_int) durationInt = res.duration_int;
+          fingerprintsCollected.push({ algorithm: algo, hash: res.hash });
+          if (res.matched) {
+            matched = { algorithm: algo, scene: res.scene };
+            // Mark remaining algorithms as skipped for clarity.
+            for (const skipAlgo of algorithms.slice(algorithms.indexOf(algo) + 1)) {
+              const skipNode = pushStep(skipAlgo, "skipped (earlier match)", "skipped");
+              skipNode.classList.add("skipped");
+            }
+            break;
+          }
+        }
+
+        if (matched) {
+          renderHashMatch(matched.algorithm, matched.scene);
+          let contribMsg = '';
+          try {
+            const contrib = await contributeMatchedScene(
+              filename, matched, fingerprintsCollected, durationInt,
+            );
+            if (contrib && contrib.message) contribMsg = ' ' + contrib.message;
+          } catch (e) {
+            contribMsg = ' Fingerprint submit failed: ' + e.message;
+          }
+          setStatus(autoStatus, 'ok',
+            `Already on StashDB — matched by ${matched.algorithm}. No draft created.${contribMsg}`);
+          return;
+        }
+
+        // No fingerprint match. Optional URL/title check (cheap belt-and-suspenders).
+        const draft = gatherDraftPayload();
+        if (draft.title || draft.studio || draft.urls.length || getPerformers().length) {
+          const node = pushStep("URL", "checking searchScene + URL overlap…", "running");
+          const urlRes = await runUrlCheck({
+            title: draft.title, studio: draft.studio,
+            performers: getPerformers(), urls: draft.urls,
+            fingerprints: [],
+          }, node);
+          if (urlRes.matched) {
+            renderUrlMatches(urlRes.payload.likely_matches || []);
+            setStatus(autoStatus, "warn",
+              "URL overlap with an existing scene. Confirm override below to draft anyway.");
+            overrideRow.style.display = "flex";
+            // Stash hashes so a tick of confirm-override submits directly (no recompute).
+            pendingDraft = { filename, fingerprintsCollected, durationInt };
+            return;
+          }
+        }
+
+        if (!allowSubmit) {
+          setStatus(autoStatus, "ok",
+            "No StashDB match. Click Auto-check & Submit to draft.");
+          // Keep the hashes cached so a follow-up Auto-check & Submit can reuse the durations
+          // even though we re-run today. (Reserved for future Submit-only button.)
+          pendingDraft = { filename, fingerprintsCollected, durationInt };
+          return;
+        }
+
+        if (!draft.title) {
+          setStatus(autoStatus, "warn",
+            "No StashDB match — but Title is required to submit a draft. Fill it in and rerun.");
+          pendingDraft = { filename, fingerprintsCollected, durationInt };
+          return;
+        }
+
+        await finalizeDraft({ filename, fingerprintsCollected, durationInt });
+      } catch (err) {
+        setStatus(autoStatus, "err", err.message);
+      } finally {
+        runAutoBtn.disabled = false;
+        runDetectBtn.disabled = false;
+      }
+    }
+
+    async function finalizeDraft({ filename, fingerprintsCollected, durationInt }) {
+      const submitNode = pushStep("DRAFT", "submitting to StashDB…", "running");
+      try {
+        const data = await submitDraft({
+          filename, fingerprintsCollected, durationInt,
+        });
+        updateStep(submitNode, {
+          state: "miss",
+          detail: `submitted — id ${data.draft_id}`,
+        });
+        setStatus(autoStatus, "ok", "Draft created.");
+        submitStatus.className = "status ok";
+        submitStatus.innerHTML = `Draft created. Review &amp; finalize on StashDB:
+          <a href="${escAttr(data.draft_url)}" target="_blank" rel="noopener">${esc(data.draft_url)}</a>`;
+        pendingDraft = null;
+      } catch (e) {
+        updateStep(submitNode, { state: "error", detail: e.message });
+        throw e;
+      }
+    }
+
+    /**
+     * Pull cached hashes/duration for the current filename from the server and
+     * surface them in the UI. Marks each cached algorithm in the step list so
+     * the user can see at a glance that a re-run will skip recompute.
+     * Returns the cache entry (or {}).
+     */
+    async function loadCachedHashesForFilename(filename) {
+      cachedHashes = {};
+      if (!filename) return {};
+      try {
+        const r = await fetch("/api/cached_scene?filename=" + encodeURIComponent(filename));
+        const data = await r.json();
+        const entry = (data && data.entry) || {};
+        // Mirror server fields onto our local cache.
+        for (const k of ["oshash", "md5", "phash", "duration_int", "size_bytes"]) {
+          if (entry[k] !== undefined) cachedHashes[k] = entry[k];
+        }
+        if (entry.oshash) setHashField("OSHASH", entry.oshash);
+        if (entry.md5)    setHashField("MD5",    entry.md5);
+        if (entry.phash)  setHashField("PHASH",  entry.phash);
+        if (entry.duration_int && !fpDuration.value) {
+          fpDuration.value = String(entry.duration_int);
+        }
+        // Show a one-line "cached" pill summary so the user can tell at a glance.
+        const cachedAlgos = ["OSHASH", "MD5", "PHASH"]
+          .filter((a) => entry[a.toLowerCase()]);
+        if (cachedAlgos.length) {
+          clearSteps();
+          for (const algo of cachedAlgos) {
+            pushStep(algo, `${entry[algo.toLowerCase()]}  (cached)`, "skipped");
+          }
+          let note = `Loaded cached hashes (${cachedAlgos.join(", ")}).`;
+          if (entry.stashdb && entry.stashdb.scene_id) {
+            note += ` Last seen on StashDB via ${entry.stashdb.matched_by || "?"}.`;
+          } else {
+            note += " No prior StashDB match. Auto-check & Submit will re-verify.";
+          }
+          setStatus(autoStatus, "ok", note);
+        }
+        return entry;
+      } catch (err) {
+        // Cache lookup is best-effort; never block the UI.
+        console.warn("cached_scene load failed:", err);
+        return {};
+      }
+    }
+
+    fpFilename.addEventListener("change", () => {
+      // Reset the visible step list / matches when the user changes the
+      // filename, then pull whatever the cache has for the new name.
+      stickyRemoteBundle = false;
+      clearFingerprints();
+      clearSteps();
+      matchesEl.innerHTML = "";
+      overrideRow.style.display = "none";
+      overrideChk.checked = false;
+      setStatus(autoStatus, "", "");
+      setStatus(submitStatus, "", "");
+      loadCachedHashesForFilename(fpFilename.value.trim());
+    });
+
+    runAutoBtn.addEventListener("click", () => runPipeline({ allowSubmit: true }));
+    runDetectBtn.addEventListener("click", () => runPipeline({ allowSubmit: false }));
+
+    overrideChk.addEventListener("change", async () => {
+      // After a URL-overlap stop, ticking override submits directly using the
+      // hashes we already computed — no recompute.
+      if (!overrideChk.checked || !pendingDraft) return;
+      runAutoBtn.disabled = true;
+      runDetectBtn.disabled = true;
+      try {
+        await finalizeDraft(pendingDraft);
+      } catch (err) {
+        setStatus(autoStatus, "err", err.message);
+      } finally {
+        runAutoBtn.disabled = false;
+        runDetectBtn.disabled = false;
+      }
+    });
+
+    // ── Prefill from query string ────────────────────────────────────
+    // The post-thumber result panel links here as
+    //   /stashdb-scene-draft?filename=<basename>
+    // Remote OSHASH tool links as
+    //   /stashdb-scene-draft?remote_oshash=1&oshash=...&source_url=...
+    // /phash and /remotehash link as
+    //   /stashdb-scene-draft?remote_bundle=1&filename=<cache_basename>&source_url=...&oshash=&phash=&md5=
+    // MD5 tool (GoFile / paste) links as
+    //   /stashdb-scene-draft?remote_md5=1&md5=...&duration_int=...
+    // Optional: duration_int=123 or duration_sec=123.4
+    // when no StashDB match was found.
+    (async function prefillFromQuery() {
+      const params = new URLSearchParams(window.location.search);
+      const remoteMd5 = params.get("remote_md5") === "1";
+      const qMd5Raw = (params.get("md5") || "").trim();
+      const qMd5 = qMd5Raw.replace(/[^a-fA-F0-9]/g, "").toLowerCase();
+
+      const remote = params.get("remote_oshash") === "1";
+      const remoteBundle = params.get("remote_bundle") === "1";
+      const qOshash = (params.get("oshash") || "").trim().replace(/[^a-fA-F0-9]/g, "").toLowerCase();
+      const qPhash = (params.get("phash") || "").trim().replace(/[^a-fA-F0-9]/g, "").toLowerCase();
+      const qSource = (params.get("source_url") || "").trim();
+      let qFilename = (params.get("filename") || "").trim();
+
+      if (remoteMd5 && qMd5.length === 32) {
+        stickyRemoteMd5 = qMd5;
+        if (!qFilename) {
+          qFilename = `md5_${qMd5.slice(0, 12)}_remote_placeholder.mp4`;
+        }
+      }
+
+      if (remote && qSource && !qFilename) {
+        try {
+          const u = new URL(qSource);
+          const seg = u.pathname.split("/").filter(Boolean).pop() || "";
+          qFilename = seg.replace(/[^a-zA-Z0-9._-]+/g, "_").slice(0, 120) || "remote-video";
+        } catch {
+          qFilename = "remote-video";
+        }
+      }
+
+      if (qFilename) {
+        fpFilename.value = qFilename;
+        await loadCachedHashesForFilename(qFilename);
+      }
+
+      if (remoteBundle && qFilename) {
+        stickyRemoteBundle = true;
+        skipPhashChk.checked = true;
+      }
+
+      if (remoteBundle) {
+        if (qOshash.length === 16) {
+          cachedHashes.oshash = qOshash;
+          setHashField("OSHASH", qOshash);
+        }
+        if (qPhash.length === 16) {
+          cachedHashes.phash = qPhash;
+          setHashField("PHASH", qPhash);
+        }
+        if (qMd5.length === 32) {
+          cachedHashes.md5 = qMd5;
+          setHashField("MD5", qMd5);
+        }
+      }
+
+      if (remote && qOshash.length === 16) {
+        stickyRemoteOshash = qOshash;
+        cachedHashes.oshash = qOshash;
+        setHashField("OSHASH", qOshash);
+        skipPhashChk.checked = true;
+      }
+
+      if (stickyRemoteMd5) {
+        cachedHashes.md5 = stickyRemoteMd5;
+        setHashField("MD5", stickyRemoteMd5);
+        skipPhashChk.checked = true;
+      }
+
+      const qDurInt = (params.get("duration_int") || "").trim();
+      const qDurSec = (params.get("duration_sec") || "").trim();
+      if (/^\d+$/.test(qDurInt)) {
+        fpDuration.value = qDurInt;
+      } else if (qDurSec && /^\d+(\.\d+)?$/.test(qDurSec)) {
+        fpDuration.value = String(Math.floor(parseFloat(qDurSec, 10)));
+      }
+
+      if (remote && qOshash.length === 16) {
+        setStatus(
+          autoStatus,
+          "ok",
+          fpDuration.value.trim()
+            ? "Remote OSHASH prefilled — duration from query when provided; run Detect only or Auto-check when ready."
+            : "Remote OSHASH prefilled — enter duration if submitting a draft, then Detect only or Auto-check.",
+        );
+      } else if (remoteMd5 && stickyRemoteMd5) {
+        setStatus(
+          autoStatus,
+          "ok",
+          fpDuration.value.trim()
+            ? "Remote MD5 prefilled — run Detect only or Auto-check when ready."
+            : "Remote MD5 prefilled — enter duration if submitting a draft, then Detect only or Auto-check.",
+        );
+      } else if (remoteBundle && qFilename) {
+        setStatus(
+          autoStatus,
+          "ok",
+          fpDuration.value.trim()
+            ? "Remote OSHASH/PHASH prefilled from cache — run Detect only or Auto-check when ready."
+            : "Remote OSHASH/PHASH prefilled — enter duration if submitting a draft, then Detect or Auto-check.",
+        );
+      }
+
+      if (qSource && fields.urls && !fields.urls.value.trim()) {
+        fields.urls.value = qSource;
+      }
+    })();
+  </script>
+</body>
+</html>

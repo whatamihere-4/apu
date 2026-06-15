@@ -1,0 +1,135 @@
+services:
+  gofup:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.gofup
+    container_name: gofup
+    restart: unless-stopped
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+      - type: bind
+        source: ${MEDIA_DOWNLOADS_DIR:-./downloads}
+        target: /downloads
+      - type: bind
+        source: ${MEDIA_THUMBS_DIR:-./thumbs}
+        target: /thumbs
+    networks:
+      - app_net
+
+  hasher-http:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.hasher
+      args:
+        STASH_REF: ${STASH_REF:-v0.27.2}
+        # Set in .env if proxy.golang.org is flaky (e.g. GOPROXY=https://goproxy.io,direct).
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+    image: hasher:latest
+    container_name: hasher-http
+    restart: unless-stopped
+    environment:
+      HASHER_IN_DIR: /downloads
+      HASHER_HTTP_HOST: 0.0.0.0
+      HASHER_HTTP_PORT: "8089"
+      HASHER_HTTP_TOKEN: ${HASHER_HTTP_TOKEN:-}
+      HASHER_HTTP_VERBOSE: ${HASHER_HTTP_VERBOSE:-}
+      HASHER_PHASH_TIMEOUT_SEC: ${HASHER_PHASH_TIMEOUT_SEC:-1800}
+    volumes:
+      - type: bind
+        source: ${MEDIA_DOWNLOADS_DIR:-./downloads}
+        target: /downloads
+        read_only: true
+    networks:
+      - app_net
+
+  thumber:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.thumber
+    # Distinct tag avoids reusing an older global `thumber:latest` image built without bash.
+    image: monolith-thumber:latest
+    working_dir: /app
+    environment:
+      THUMBER_IN_DIR: /downloads
+      THUMBER_OUT_DIR: /thumbs
+      THUMBER_FFMPEG_TIMEOUT_SEC: ${THUMBER_FFMPEG_TIMEOUT_SEC:-300}
+      THUMBER_FFMPEG_TIMEOUT_SLOW_SEC: ${THUMBER_FFMPEG_TIMEOUT_SLOW_SEC:-600}
+    volumes:
+      - ./scripts/thumbs.sh:/usr/local/bin/thumbs:ro
+      - .:/app
+      - type: bind
+        source: ${MEDIA_DOWNLOADS_DIR:-./downloads}
+        target: /downloads
+        read_only: true
+      - type: bind
+        source: ${MEDIA_THUMBS_DIR:-./thumbs}
+        target: /thumbs
+    entrypoint: ["/bin/bash", "/usr/local/bin/thumbs"]
+
+  thumber-http:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.thumber
+    image: monolith-thumber:latest
+    working_dir: /app
+    environment:
+      THUMBER_IN_DIR: /downloads
+      THUMBER_OUT_DIR: /thumbs
+      THUMBER_HTTP_HOST: 0.0.0.0
+      THUMBER_HTTP_PORT: "8080"
+      THUMBER_HTTP_TOKEN: ${THUMBER_HTTP_TOKEN:-}
+      THUMBER_HTTP_VERBOSE: ${THUMBER_HTTP_VERBOSE:-}
+      THUMBER_FFMPEG_TIMEOUT_SEC: ${THUMBER_FFMPEG_TIMEOUT_SEC:-300}
+      THUMBER_FFMPEG_TIMEOUT_SLOW_SEC: ${THUMBER_FFMPEG_TIMEOUT_SLOW_SEC:-600}
+    volumes:
+      - ./scripts/thumbs.sh:/usr/local/bin/thumbs:ro
+      - ./py/thumber_http.py:/usr/local/lib/thumber/thumber_http.py:ro
+      - .:/app
+      - type: bind
+        source: ${MEDIA_DOWNLOADS_DIR:-./downloads}
+        target: /downloads
+        read_only: true
+      - type: bind
+        source: ${MEDIA_THUMBS_DIR:-./thumbs}
+        target: /thumbs
+    networks:
+      - app_net
+    entrypoint: ["python3", "-u", "/usr/local/lib/thumber/thumber_http.py"]
+
+  # Splits oversized uploads (e.g. for Filester's 10 GB cap) via ffmpeg stream
+  # copy. Isolated so CPU/memory can be capped; only used when SPLITTER_HTTP_URL
+  # points here. gofup falls back to in-process splitting when that is unset.
+  splitter-http:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.splitter
+    image: monolith-splitter:latest
+    container_name: splitter-http
+    restart: unless-stopped
+    cpus: ${SPLITTER_CPU_LIMIT:-1.5}
+    mem_limit: ${SPLITTER_MEM_LIMIT:-1g}
+    pids_limit: ${SPLITTER_PIDS_LIMIT:-256}
+    environment:
+      SPLITTER_IN_DIR: /downloads
+      SPLITTER_HTTP_HOST: 0.0.0.0
+      SPLITTER_HTTP_PORT: "8090"
+      SPLITTER_HTTP_TOKEN: ${SPLITTER_HTTP_TOKEN:-}
+      SPLITTER_FFMPEG_TIMEOUT_SEC: ${SPLITTER_FFMPEG_TIMEOUT_SEC:-7200}
+    volumes:
+      - ./py/file_splitter.py:/usr/local/lib/splitter/file_splitter.py:ro
+      - ./py/splitter_http.py:/usr/local/lib/splitter/splitter_http.py:ro
+      - type: bind
+        source: ${MEDIA_DOWNLOADS_DIR:-./downloads}
+        target: /downloads
+    networks:
+      - app_net
+
+networks:
+  app_net:
+    external: true
+    name: ${MONOLITH_NETWORK:-caddy_net}

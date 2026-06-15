@@ -1,0 +1,603 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Remote hashes — gofup</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #0e0e10;
+      --surface: #18181b;
+      --border: #2d2d33;
+      --accent: #6d5dfc;
+      --accent-hover: #8577fd;
+      --text: #e4e4e7;
+      --muted: #71717a;
+      --success: #22c55e;
+      --error: #ef4444;
+      --radius: 10px;
+    }
+    body {
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 2rem 1rem;
+    }
+    h1 { font-size: 1.75rem; font-weight: 700; margin-bottom: 0.25rem; }
+    .subtitle { color: var(--muted); font-size: 0.9rem; margin-bottom: 1.5rem; max-width: 680px; text-align: center; line-height: 1.45; }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.5rem;
+      width: 100%;
+      max-width: 680px;
+      margin-bottom: 1rem;
+    }
+    label { display: block; font-size: 0.8rem; color: var(--muted); margin-bottom: 0.35rem; text-transform: uppercase; letter-spacing: 0.04em; }
+    input[type="url"], input[type="text"], input[type="number"], textarea {
+      width: 100%; padding: 0.65rem 0.85rem;
+      background: var(--bg); border: 1px solid var(--border);
+      border-radius: 6px; color: var(--text); font-size: 0.9rem;
+    }
+    textarea { min-height: 7rem; resize: vertical; font-family: inherit; }
+    input:focus, textarea:focus { outline: none; border-color: var(--accent); }
+    .btn {
+      margin-top: 1rem;
+      padding: 0.6rem 1.3rem; font-size: 0.85rem; font-weight: 600;
+      border: none; border-radius: 6px; cursor: pointer;
+      background: var(--accent); color: #fff;
+    }
+    .btn:hover { background: var(--accent-hover); }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn.secondary { background: var(--border); color: var(--text); }
+    .btn.secondary:hover { background: #3f3f46; }
+    .btn.inline { margin-top: 0; }
+    #result {
+      margin-top: 1rem;
+      padding: 1rem;
+      border-radius: 8px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      font-size: 0.88rem;
+      line-height: 1.5;
+      display: none;
+    }
+    #result.visible { display: block; }
+    #result.ok { border-left: 3px solid var(--success); }
+    #result.err { border-left: 3px solid var(--error); }
+    .hash { font-family: ui-monospace, monospace; font-size: 0.92rem; word-break: break-all; }
+    .muted { color: var(--muted); font-size: 0.82rem; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .actions { margin-top: 0.85rem; display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
+    .dur-row { margin-top: 0.65rem; display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
+    .dur-row label { margin: 0; text-transform: none; letter-spacing: normal; font-size: 0.82rem; }
+    .row-item { padding: 0.85rem 0; border-top: 1px solid var(--border); }
+    .row-item:first-child { border-top: none; padding-top: 0; }
+    .row-item-title { font-size: 0.78rem; color: var(--muted); margin-bottom: 0.5rem; word-break: break-all; }
+    .md5-row { margin-top: 0.65rem; display: grid; grid-template-columns: 1fr auto; gap: 0.5rem; align-items: end; }
+    .md5-row label { grid-column: 1 / -1; }
+    .batch-toolbar {
+      margin-bottom: 1rem;
+      padding-bottom: 1rem;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      align-items: center;
+    }
+    .batch-toolbar .btn { margin-top: 0; }
+  </style>
+</head>
+<body>
+  <h1>Remote hashes (OSHASH + PHASH)</h1>
+  <p class="subtitle">For each URL: <strong>OSHASH</strong> via HTTP Range when possible, full download for <strong>PHASH</strong>, optional <strong>MD5</strong> you paste (merged into <code>cache/scenes.json</code>). Use <strong>Apply MD5 &amp; re-check</strong> after entering MD5 to query StashDB again. <strong>Submit all</strong> only processes rows that already matched StashDB.</p>
+
+  <div class="card">
+    <label for="urls">Video file URL(s)</label>
+    <textarea id="urls" placeholder="https://example.com/a.mp4&#10;https://example.com/b.mp4" autocomplete="off" spellcheck="false"></textarea>
+    <button type="button" class="btn" id="go-btn">Fetch hashes</button>
+  </div>
+
+  <div class="card">
+    <div id="result"></div>
+  </div>
+
+  <p class="muted"><a href="/phash">Remote PHASH</a> · <a href="/oshash">Remote OSHASH</a> · <a href="/md5">MD5 → StashDB</a> · <a href="/">← Back to gofup</a></p>
+
+  <script>
+    const resultEl = document.getElementById('result');
+    const btn = document.getElementById('go-btn');
+    /** { url, data } */
+    let batchResults = [];
+
+    function showResult(html, ok) {
+      resultEl.innerHTML = html;
+      resultEl.className = 'visible ' + (ok ? 'ok' : 'err');
+    }
+
+    function sceneUrlWithFingerprintsHash(u) {
+      if (!u) return '';
+      const s = String(u);
+      const base = s.replace(/#.*$/, '');
+      return base + '#fingerprints';
+    }
+
+    function parseUrlList(raw) {
+      return raw.split(/\r?\n/).map((s) => s.trim()).filter((s) => s.length > 0 && !s.startsWith('#'));
+    }
+
+    function statusFromStreamEvent(ev) {
+      if (ev.type === 'download') {
+        if (ev.pct != null && Number(ev.pct) >= 0 && ev.total_fmt) {
+          return 'Download ' + Number(ev.pct).toFixed(1) + '% — '
+            + (ev.downloaded_fmt || '') + ' / ' + (ev.total_fmt || '')
+            + (ev.speed_fmt ? ' @ ' + ev.speed_fmt : '');
+        }
+        return 'Downloading ' + (ev.downloaded_fmt || '') + (ev.speed_fmt ? ' @ ' + ev.speed_fmt : '');
+      }
+      if (ev.type === 'heartbeat' && ev.algorithm === 'PHASH') {
+        let s = 'PHASH ' + (ev.elapsed_sec != null ? ev.elapsed_sec + 's' : '');
+        if (ev.stderr_tail && String(ev.stderr_tail).trim()) {
+          s += ' — ' + String(ev.stderr_tail).replace(/\s+/g, ' ').slice(0, 120);
+        }
+        return s;
+      }
+      if (ev.type === 'phase') return String(ev.phase || '').replace(/_/g, ' ');
+      if (ev.type === 'progress' && ev.algorithm === 'MD5') {
+        const p = ev.pct != null ? Number(ev.pct).toFixed(1) + '%' : '';
+        return 'MD5 ' + p + ' (' + (ev.read_bytes || 0) + ' / ' + (ev.total_bytes || 0) + ' B)';
+      }
+      return '';
+    }
+
+    async function consumeRemoteHashesStream(url, md5Optional, onStatus) {
+      const body = { url };
+      if (md5Optional && String(md5Optional).length === 32) body.md5 = md5Optional;
+      const r = await fetch('/api/remote_hashes_from_url/stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!r.ok) {
+        const t = await r.text();
+        throw new Error(t.slice(0, 500) || ('HTTP ' + r.status));
+      }
+      const reader = r.body.getReader();
+      const dec = new TextDecoder();
+      let buf = '';
+      let statusLine = '';
+      let donePayload = null;
+      while (true) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        buf += dec.decode(chunk.value, { stream: true });
+        let nl;
+        while ((nl = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, nl).trim();
+          buf = buf.slice(nl + 1);
+          if (!line) continue;
+          let ev;
+          try { ev = JSON.parse(line); } catch (e) { continue; }
+          const st = statusFromStreamEvent(ev);
+          if (st) {
+            statusLine = st;
+            if (onStatus) onStatus(st);
+          }
+          if (ev.type === 'error') throw new Error(ev.error || 'stream error');
+          if (ev.type === 'done' && ev.ok) donePayload = ev;
+        }
+      }
+      if (!donePayload || !donePayload.ok) {
+        throw new Error((donePayload && donePayload.error) || 'stream ended without result');
+      }
+      const d = { ...donePayload };
+      delete d.type;
+      return { data: d, statusLine };
+    }
+
+    function durValFromData(data) {
+      if (data.duration_int != null && Number.isFinite(Number(data.duration_int))) {
+        return String(parseInt(String(data.duration_int), 10));
+      }
+      if (data.duration != null && Number.isFinite(Number(data.duration))) {
+        return String(Math.floor(Number(data.duration)));
+      }
+      return '';
+    }
+
+    function normHex16(s) {
+      return String(s || '').replace(/[^a-fA-F0-9]/g, '').toLowerCase();
+    }
+
+    function normHex32(s) {
+      return String(s || '').replace(/[^a-fA-F0-9]/g, '').toLowerCase();
+    }
+
+    function fingerprintsFromRemoteData(data) {
+      const fps = [];
+      const o = normHex16(data.oshash);
+      const p = normHex16(data.phash);
+      const m = normHex32(data.md5);
+      if (o.length === 16) fps.push({ algorithm: 'OSHASH', hash: o });
+      if (p.length === 16) fps.push({ algorithm: 'PHASH', hash: p });
+      if (m.length === 32) fps.push({ algorithm: 'MD5', hash: m });
+      return fps;
+    }
+
+    function draftHrefRemoteBundle(url, data) {
+      const durVal = durValFromData(data);
+      let h = '/stashdb-scene-draft?remote_bundle=1'
+        + '&filename=' + encodeURIComponent(data.cache_filename || '')
+        + '&source_url=' + encodeURIComponent(url);
+      const o = normHex16(data.oshash);
+      const p = normHex16(data.phash);
+      const m = normHex32(data.md5);
+      if (o.length === 16) h += '&oshash=' + encodeURIComponent(o);
+      if (p.length === 16) h += '&phash=' + encodeURIComponent(p);
+      if (m.length === 32) h += '&md5=' + encodeURIComponent(m);
+      if (durVal !== '') h += '&duration_int=' + encodeURIComponent(durVal);
+      return h;
+    }
+
+    function buildErrorBlock(url, message, idx) {
+      return (
+        '<div class="row-item" id="remote-row-' + idx + '"><div class="row-item-title">#'
+        + (idx + 1) + ' — <span class="hash">' + escapeHtml(url) + '</span></div>'
+        + '<div style="color:var(--error);">' + escapeHtml(message) + '</div></div>'
+      );
+    }
+
+    function buildRowInner(url, data, idx) {
+      const durVal = durValFromData(data);
+      const durAttr = durVal !== '' ? ' value="' + escapeHtml(durVal) + '"' : '';
+      const md5Val = data.md5 ? escapeHtml(data.md5) : '';
+      let html = '';
+      html += '<div class="row-item-title">#' + (idx + 1) + ' — <span class="hash">' + escapeHtml(url) + '</span></div>';
+      html += '<div><strong>OSHASH</strong></div><div class="hash">' + escapeHtml(data.oshash || '—') + '</div>';
+      html += '<div style="margin-top:0.5rem;"><strong>PHASH</strong></div><div class="hash">' + escapeHtml(data.phash || '—') + '</div>';
+      if (data.cache_filename) {
+        html += '<div class="muted" style="margin-top:0.45rem;">Cache file: <span class="hash">' + escapeHtml(data.cache_filename) + '</span></div>';
+      }
+      html += '<div class="md5-row">';
+      html += '<label for="md5-in-' + idx + '">MD5 (optional)</label>';
+      html += '<input type="text" id="md5-in-' + idx + '" placeholder="32 hex chars" autocomplete="off" spellcheck="false" value="' + md5Val + '">';
+      html += '<button type="button" class="btn inline" id="md5-apply-' + idx + '">Apply MD5 &amp; re-check</button>';
+      html += '</div>';
+      html += '<div id="md5-msg-' + idx + '" class="muted" style="margin-top:0.35rem;"></div>';
+      html += '<div class="muted" style="margin-top:0.5rem;">Size: ' + (data.size_bytes != null ? data.size_bytes.toLocaleString() : '—') + ' bytes</div>';
+      if (data.final_url) {
+        html += '<div class="muted">Resolved: <span class="hash">' + escapeHtml(data.final_url) + '</span></div>';
+      }
+      if (data.stashdb_hit_by) {
+        html += '<div class="muted" style="margin-top:0.35rem;">StashDB matched by: ' + escapeHtml(data.stashdb_hit_by) + '</div>';
+      }
+      if (durVal !== '') {
+        html += '<div class="muted" style="margin-top:0.45rem;">Duration (auto): ';
+        if (data.duration != null) html += '~' + escapeHtml(String(data.duration)) + ' s → ';
+        html += escapeHtml(durVal) + ' s';
+        if (data.duration_detail) {
+          html += ' <span class="muted">(' + escapeHtml(data.duration_detail) + ')</span>';
+        }
+        html += '</div>';
+      }
+      if (data.stashdb_match) {
+        const m = data.stashdb_match;
+        html += '<div style="margin-top:0.75rem;"><strong>StashDB</strong> — match<br>';
+        html += escapeHtml(m.title || '') + '<br>';
+        if (m.link) {
+          const uFp = sceneUrlWithFingerprintsHash(m.link);
+          html += '<a href="' + escapeHtml(uFp) + '" target="_blank" rel="noopener">' + escapeHtml(uFp) + '</a>';
+        }
+        html += '</div>';
+        const sid = (m.id || '').trim();
+        const canSubmit = data.stashdb_can_submit && sid;
+        html += '<div class="dur-row">';
+        html += '<label for="dur-sec-' + idx + '">Duration (sec)</label>';
+        html += '<input type="number" id="dur-sec-' + idx + '" min="0" step="1" placeholder="required for submit"' + durAttr + '>';
+        html += '</div>';
+        html += '<div class="muted" style="margin-top:0.35rem;">'
+          + (durVal !== '' ? 'Prefilled when possible; correct if needed.' : 'Enter clip length StashDB expects.')
+          + '</div>';
+        html += '<div class="actions">';
+        html += '<button type="button" class="btn inline" id="submit-sure-' + idx + '"' + (canSubmit ? '' : ' disabled') + '>Submit sure fingerprints</button>';
+        if (!canSubmit) html += '<span class="muted">Enable API key + STASHDB_AUTO_CONTRIBUTE.</span>';
+        html += '</div>';
+        html += '<div id="submit-msg-' + idx + '" class="muted" style="margin-top:0.5rem;"></div>';
+      } else {
+        if (data.stashdb_match === null && !data.stashdb_skipped && !data.stashdb_error) {
+          html += '<div class="muted" style="margin-top:0.75rem;">StashDB: no scene with these fingerprints (OSHASH, PHASH, optional MD5).</div>';
+        }
+        const canSubmitMan = !!data.stashdb_can_submit;
+        html += '<hr style="margin:1rem 0;border:none;border-top:1px solid var(--border);">';
+        html += '<div><strong>Know the scene on StashDB?</strong></div>';
+        html += '<div class="muted" style="margin-top:0.35rem;">Paste the scene URL to attach OSHASH, PHASH, and MD5 (if set) as fingerprints.</div>';
+        html += '<label for="manual-scene-url-' + idx + '" style="margin-top:0.65rem;">StashDB scene URL</label>';
+        html += '<input type="text" id="manual-scene-url-' + idx + '" placeholder="https://stashdb.org/scenes/…" autocomplete="off">';
+        html += '<div class="dur-row" style="margin-top:0.65rem;">';
+        html += '<label for="dur-sec-manual-' + idx + '">Duration (sec)</label>';
+        html += '<input type="number" id="dur-sec-manual-' + idx + '" min="0" step="1" placeholder="required for submit"' + durAttr + '>';
+        html += '</div>';
+        html += '<div class="actions">';
+        html += '<button type="button" class="btn inline" id="submit-manual-' + idx + '"' + (canSubmitMan ? '' : ' disabled') + '>Submit fingerprints to pasted scene</button>';
+        if (!canSubmitMan) html += '<span class="muted">Requires API key + STASHDB_AUTO_CONTRIBUTE.</span>';
+        html += '</div>';
+        html += '<div id="submit-manual-msg-' + idx + '" class="muted" style="margin-top:0.5rem;"></div>';
+        if (data.stashdb_match === null && !data.stashdb_skipped && !data.stashdb_error) {
+          const draftHref = draftHrefRemoteBundle(url, data);
+          html += '<div class="actions" style="margin-top:0.85rem;"><a class="btn secondary" href="' + escapeHtml(draftHref) + '" style="display:inline-block;margin-top:0;text-decoration:none;">Create StashDB draft…</a></div>';
+          html += '<div class="muted" style="margin-top:0.45rem;">Draft opens with cached filename, hashes, source URL, and optional MD5 prefilled.</div>';
+        }
+      }
+      if (data.stashdb_skipped) {
+        html += '<div class="muted" style="margin-top:0.75rem;">StashDB: ' + escapeHtml(data.stashdb_skipped) + '</div>';
+      }
+      if (data.stashdb_error) {
+        html += '<div class="muted" style="margin-top:0.75rem;">StashDB lookup failed: ' + escapeHtml(data.stashdb_error) + '</div>';
+      }
+      return html;
+    }
+
+    function buildRowHtml(url, data, idx) {
+      return '<div class="row-item" id="remote-row-' + idx + '">' + buildRowInner(url, data, idx) + '</div>';
+    }
+
+    function sureMatchSubmitIndices() {
+      const out = [];
+      for (let idx = 0; idx < batchResults.length; idx++) {
+        const br = batchResults[idx];
+        if (!br || !br.data || !br.data.stashdb_match) continue;
+        const sid = (br.data.stashdb_match.id || '').trim();
+        if (br.data.stashdb_can_submit && sid) out.push(idx);
+      }
+      return out;
+    }
+
+    function buildSubmitAllToolbar(count) {
+      if (count < 1) return '';
+      return (
+        '<div class="batch-toolbar">'
+        + '<button type="button" class="btn" id="submit-all-sure-btn">Submit all StashDB matches'
+        + ' <span class="muted">(' + count + ')</span></button>'
+        + '<span id="submit-all-msg" class="muted"></span>'
+        + '</div>'
+      );
+    }
+
+    function renderAll() {
+      const parts = [];
+      for (let i = 0; i < batchResults.length; i++) {
+        const br = batchResults[i];
+        if (!br) {
+          parts.push(buildErrorBlock('', 'Missing row', i));
+          continue;
+        }
+        if (br.error || !br.data) {
+          parts.push(buildErrorBlock(br.url || '', br.error || 'Failed', i));
+          continue;
+        }
+        parts.push(buildRowHtml(br.url, br.data, i));
+      }
+      const sureN = sureMatchSubmitIndices().length;
+      resultEl.innerHTML = buildSubmitAllToolbar(sureN) + parts.join('');
+      const anyOk = batchResults.some((x) => x && x.data);
+      resultEl.className = 'visible ' + (anyOk ? 'ok' : 'err');
+      resultEl.style.display = 'block';
+      wireBatchListeners();
+    }
+
+    function wireBatchListeners() {
+      for (let idx = 0; idx < batchResults.length; idx++) {
+        const br = batchResults[idx];
+        if (!br || !br.data) continue;
+        const sure = document.getElementById('submit-sure-' + idx);
+        if (sure && br.data.stashdb_match) sure.addEventListener('click', () => onSubmitSureIdx(idx));
+        const manual = document.getElementById('submit-manual-' + idx);
+        if (manual && !br.data.stashdb_match) manual.addEventListener('click', () => onSubmitManualIdx(idx));
+        const apply = document.getElementById('md5-apply-' + idx);
+        if (apply) apply.addEventListener('click', () => onApplyMd5(idx));
+      }
+      const submitAllBtn = document.getElementById('submit-all-sure-btn');
+      if (submitAllBtn) submitAllBtn.addEventListener('click', onSubmitAllSureMatches);
+      requestAnimationFrame(() => {
+        for (let idx = 0; idx < batchResults.length; idx++) {
+          const br = batchResults[idx];
+          if (!br || !br.data) continue;
+          const dv = durValFromData(br.data);
+          if (!dv) continue;
+          ['dur-sec-' + idx, 'dur-sec-manual-' + idx].forEach((id) => {
+            const el = document.getElementById(id);
+            if (el) el.value = dv;
+          });
+        }
+      });
+    }
+
+    async function onApplyMd5(idx) {
+      const br = batchResults[idx];
+      const inp = document.getElementById('md5-in-' + idx);
+      const btn = document.getElementById('md5-apply-' + idx);
+      if (!br || !br.url || br.error || !br.data) return;
+      const raw = (inp && inp.value) ? inp.value.trim() : '';
+      const md5 = normHex32(raw);
+      if (raw && md5.length !== 32) {
+        const msg = document.getElementById('md5-msg-' + idx);
+        if (msg) msg.textContent = 'MD5 must be 32 hexadecimal characters (or leave empty).';
+        return;
+      }
+      if (btn) btn.disabled = true;
+      try {
+        const { data } = await consumeRemoteHashesStream(br.url, md5.length === 32 ? md5 : '', (st) => {
+          const msg = document.getElementById('md5-msg-' + idx);
+          if (msg) msg.textContent = st;
+        });
+        batchResults[idx] = { url: br.url, data };
+        renderAll();
+        const msg = document.getElementById('md5-msg-' + idx);
+        if (msg) msg.textContent = 'Updated.';
+      } catch (e) {
+        const msg = document.getElementById('md5-msg-' + idx);
+        if (msg) msg.textContent = String(e.message || e);
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    }
+
+    document.getElementById('go-btn').addEventListener('click', async () => {
+      const urls = parseUrlList(document.getElementById('urls').value);
+      batchResults = [];
+      if (urls.length === 0) {
+        showResult('Enter at least one URL (one per line).', false);
+        return;
+      }
+      btn.disabled = true;
+      resultEl.className = 'visible';
+      resultEl.style.borderLeftColor = 'var(--border)';
+      resultEl.style.display = 'block';
+      try {
+        for (let i = 0; i < urls.length; i++) {
+          resultEl.className = 'visible';
+          resultEl.style.display = 'block';
+          resultEl.innerHTML =
+            '<div class="muted" style="margin-bottom:0.75rem;">Processing ' + (i + 1) + ' / ' + urls.length + '…</div>';
+          try {
+            const { data } = await consumeRemoteHashesStream(urls[i], '', (st) => {
+              resultEl.innerHTML =
+                '<div class="muted" style="margin-bottom:0.75rem;">#'
+                + (i + 1) + ' / ' + urls.length + ' — <span class="hash">' + escapeHtml(urls[i]) + '</span><br>'
+                + escapeHtml(st) + '</div>';
+            });
+            batchResults[i] = { url: urls[i], data };
+          } catch (e) {
+            batchResults[i] = { url: urls[i], error: String(e.message || e) };
+          }
+        }
+        renderAll();
+      } catch (e) {
+        showResult('<strong>Request failed</strong><br>' + escapeHtml(String(e.message || e)), false);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    async function postFingerprintsToScene(sceneId, durationSec, data) {
+      const fps = fingerprintsFromRemoteData(data);
+      if (!fps.length) {
+        return { ok: false, text: 'No valid fingerprints to submit.' };
+      }
+      const r = await fetch('/api/stashdb_submit_scene_fingerprints', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scene_id: sceneId, duration: durationSec, fingerprints: fps }),
+      });
+      const out = await r.json();
+      if (!r.ok || out.error) {
+        return { ok: false, text: out.error || ('HTTP ' + r.status) };
+      }
+      const rows = (out.results || []).map((x) =>
+        x.algorithm + ': ' + (x.ok ? 'ok' : ('failed' + (x.error ? ' — ' + x.error : '')))
+      ).join('; ');
+      return { ok: true, text: rows || 'Done.' };
+    }
+
+    async function onSubmitAllSureMatches() {
+      const indices = sureMatchSubmitIndices();
+      if (indices.length === 0) return;
+      const batchBtn = document.getElementById('submit-all-sure-btn');
+      const batchMsg = document.getElementById('submit-all-msg');
+      if (batchBtn) batchBtn.disabled = true;
+      if (batchMsg) batchMsg.textContent = '';
+      try {
+        for (let j = 0; j < indices.length; j++) {
+          const idx = indices[j];
+          const br = batchResults[idx];
+          const durEl = document.getElementById('dur-sec-' + idx);
+          const msgEl = document.getElementById('submit-msg-' + idx);
+          const submitBtn = document.getElementById('submit-sure-' + idx);
+          if (!br || !br.data || !br.data.stashdb_match) continue;
+          const sid = (br.data.stashdb_match.id || '').trim();
+          const durRaw = durEl ? durEl.value.trim() : '';
+          const dur = parseInt(durRaw, 10);
+          if (!Number.isFinite(dur) || dur < 0) {
+            if (msgEl) msgEl.textContent = 'Skipped — enter a valid duration (seconds).';
+            continue;
+          }
+          if (submitBtn) submitBtn.disabled = true;
+          if (msgEl) msgEl.textContent = 'Submitting… (' + (j + 1) + ' / ' + indices.length + ')';
+          const res = await postFingerprintsToScene(sid, dur, br.data);
+          if (msgEl) msgEl.textContent = res.text;
+          if (submitBtn) submitBtn.disabled = false;
+        }
+        if (batchMsg) batchMsg.textContent = 'Finished.';
+      } catch (e) {
+        if (batchMsg) batchMsg.textContent = String(e.message || e);
+      } finally {
+        if (batchBtn) batchBtn.disabled = false;
+      }
+    }
+
+    async function onSubmitSureIdx(idx) {
+      const br = batchResults[idx];
+      const msg = document.getElementById('submit-msg-' + idx);
+      const durEl = document.getElementById('dur-sec-' + idx);
+      const submitBtn = document.getElementById('submit-sure-' + idx);
+      if (!br || !br.data || !br.data.stashdb_match) return;
+      const sid = (br.data.stashdb_match.id || '').trim();
+      await submitToScene(sid, durEl, msg, submitBtn, br.data);
+    }
+
+    async function onSubmitManualIdx(idx) {
+      const br = batchResults[idx];
+      const msg = document.getElementById('submit-manual-msg-' + idx);
+      const durEl = document.getElementById('dur-sec-manual-' + idx);
+      const submitBtn = document.getElementById('submit-manual-' + idx);
+      const raw = (document.getElementById('manual-scene-url-' + idx) || {}).value || '';
+      const sid = extractStashdbSceneId(raw);
+      if (!sid) {
+        if (msg) msg.textContent = 'Paste a StashDB scene URL (must contain a scene UUID).';
+        return;
+      }
+      if (!br || !br.data) return;
+      await submitToScene(sid, durEl, msg, submitBtn, br.data);
+    }
+
+    async function submitToScene(sceneId, durEl, msgEl, submitBtn, payload) {
+      const durRaw = durEl ? durEl.value.trim() : '';
+      const dur = parseInt(durRaw, 10);
+      if (!Number.isFinite(dur) || dur < 0) {
+        if (msgEl) msgEl.textContent = 'Enter a valid duration (seconds).';
+        return;
+      }
+      if (submitBtn) submitBtn.disabled = true;
+      if (msgEl) msgEl.textContent = 'Submitting…';
+      try {
+        const res = await postFingerprintsToScene(sceneId, dur, payload);
+        if (msgEl) msgEl.textContent = res.text;
+      } catch (e) {
+        if (msgEl) msgEl.textContent = String(e.message || e);
+      } finally {
+        if (submitBtn) submitBtn.disabled = false;
+      }
+    }
+
+    function extractStashdbSceneId(text) {
+      const m = String(text || '').match(
+        /\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b/
+      );
+      return m ? m[0] : null;
+    }
+
+    function escapeHtml(s) {
+      const d = document.createElement('div');
+      d.textContent = s;
+      return d.innerHTML;
+    }
+  </script>
+</body>
+</html>

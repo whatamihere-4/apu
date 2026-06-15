@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Secrets/local env
+.env
+.env.*
+!.env.example
+
+# Runtime/state data (do not bake into images)
+downloads/
+thumbs/
+cache/
+
+# Logs and local artifacts
+*.log
