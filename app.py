@@ -114,7 +114,11 @@ HASHES_DIR = os.path.realpath(
         or os.path.join(APP_DIR, "cache")
     )
 )
-FOLDERS_FILE = os.path.join(HASHES_DIR, "folders.json")
+GOFILE_FOLDERS_FILE = (
+    (os.environ.get("GOFILE_FOLDERS_FILE") or "").strip()
+    or os.path.join(HASHES_DIR, "gofile-folders.json")
+)
+_LEGACY_GOFILE_FOLDERS_FILE = os.path.join(HASHES_DIR, "folders.json")
 FILESTER_FOLDERS_FILE = (
     (os.environ.get("FILESTER_FOLDERS_FILE") or "").strip()
     or os.path.join(HASHES_DIR, "filester-folders.json")
@@ -293,14 +297,15 @@ _gofile_root_id = None
 
 
 def _load_gofile_folders():
-    """GoFile folder map from cache/folders.json."""
-    try:
-        with open(FOLDERS_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, dict):
-            return data
-    except (FileNotFoundError, json.JSONDecodeError):
-        pass
+    """GoFile folder map from cache/gofile-folders.json."""
+    for path in (GOFILE_FOLDERS_FILE, _LEGACY_GOFILE_FOLDERS_FILE):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+        except (FileNotFoundError, json.JSONDecodeError):
+            continue
     return {}
 
 
@@ -322,11 +327,11 @@ def _load_folders():
 
 
 def _save_folders(folders):
-    """Write GoFile folder map to cache/folders.json."""
+    """Write GoFile folder map to cache/gofile-folders.json."""
     os.makedirs(HASHES_DIR, exist_ok=True)
-    with open(FOLDERS_FILE, "w", encoding="utf-8") as f:
+    with open(GOFILE_FOLDERS_FILE, "w", encoding="utf-8") as f:
         json.dump(folders, f, indent=2, sort_keys=True)
-    print(f"[FOLDERS] Saved {len(folders)} GoFile folder(s) to {FOLDERS_FILE}", flush=True)
+    print(f"[FOLDERS] Saved {len(folders)} GoFile folder(s) to {GOFILE_FOLDERS_FILE}", flush=True)
 
 
 def _folder_match_key(label: str) -> str:
@@ -412,7 +417,7 @@ def _folder_id_search(
 
 
 def _gofile_folder_url_for_label(label: str) -> tuple[str | None, str | None]:
-    """Resolve a GoFile gallery URL from `folders.json` by folder display name.
+    """Resolve a GoFile gallery URL from `gofile-folders.json` by folder display name.
 
     Returns (url, match_mode) where match_mode is ``exact``, ``normalized``, or None.
     """
@@ -443,7 +448,7 @@ def _gofile_folder_url_for_label(label: str) -> tuple[str | None, str | None]:
 def _gofile_folder_url_search(
     label: str, *, strip_vr: bool = False
 ) -> tuple[str | None, str | None, str | None]:
-    """Match a label against GoFile ``folders.json``."""
+    """Match a label against GoFile ``gofile-folders.json``."""
     folder_id, match_mode, matched_label = _folder_id_search(
         _load_gofile_folders(), label, strip_vr=strip_vr
     )
@@ -628,7 +633,7 @@ def _resolve_studio_for_autofill(
 ) -> tuple[str, str | None, dict]:
     """Map StashDB substudio (+ optional parent network) → BBCode label + GoFile gallery URL.
 
-    Display: substudio only when ``folders.json`` has a match for the substudio; otherwise
+    Display: substudio only when ``gofile-folders.json`` has a match for the substudio; otherwise
     ``{substudio} / {network}`` when a parent network exists (``(Network)`` suffix stripped).
     Gallery: match substudio folders (exact, normalized, VR-stripped), then parent network
     (exact, normalized), then manual ``studio_aliases.json`` fallback only.
@@ -5518,7 +5523,7 @@ def api_gofile_folders():
     payload: dict = {"folders": result, "root_id": root_id}
     if not result:
         payload["warning"] = (
-            f"No folders in {FOLDERS_FILE}. "
+            f"No folders in {GOFILE_FOLDERS_FILE}. "
             "Add folders via the UI or run scripts/scrape_folders.py."
         )
     elif root_id is None and GOFILE_ENABLED:
@@ -6033,7 +6038,7 @@ _restore_pending_queue = register_queue_routes(
 if __name__ == "__main__":
     os.makedirs(DOWNLOADS_DIR, exist_ok=True)
     folders = _load_gofile_folders()
-    print(f"[gofup] Loaded {len(folders)} saved folder(s) from {FOLDERS_FILE}", flush=True)
+    print(f"[gofup] Loaded {len(folders)} saved GoFile folder(s) from {GOFILE_FOLDERS_FILE}", flush=True)
     print(
         f"[gofup] Upload: {PROVIDER_LABEL} "
         f"(gofile={GOFILE_ENABLED}, filester={FILESTER_ENABLED})",

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Build cache/folders.json by walking folder IDs under ROOT_FOLDER_LINK using the
+Build cache/gofile-folders.json by walking folder IDs under ROOT_FOLDER_LINK using the
 same JSON endpoint as the website (no paid profile API key).
 
 Uses only stdlib + requests (already used by this project).
@@ -31,7 +31,7 @@ import requests
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 APP_DIR = os.path.dirname(SCRIPT_DIR)
 ENV_PATH = os.path.join(APP_DIR, ".env")
-OUT_PATH = os.path.join(APP_DIR, "cache", "folders.json")
+OUT_PATH = os.path.join(APP_DIR, "cache", "gofile-folders.json")
 
 _DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "

@@ -1443,7 +1443,7 @@ ${threadRow}${linkRow}${mirrorRow}${fallbackLinkRow}[/TABLE]${splitBlock}`;
         const src = data.source ? ` (${data.source})` : "";
         let note = "Autofill complete" + src + ".";
         if (data.gallery_link && !activeFilename) {
-          note += " Gallery from folders.json";
+          note += " Gallery from gofile-folders.json";
           if (data.gallery_match) note += ` (${data.gallery_match} match)`;
           if (data.studio_alias) note += " via alias";
           note += ".";
