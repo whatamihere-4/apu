@@ -385,6 +385,8 @@
       galleryFilester: {{ gallery_filester|tojson }},
       splitParts: {{ split_parts|tojson }},
       splitName: {{ split_name|tojson }},
+      splitMode: {{ split_mode|tojson }},
+      filesterSplitMode: {{ filester_split_mode|tojson }},
       activeProviders: {{ active_providers|tojson }},
       filesterEnabled: {{ filester_enabled|tojson }},
       stashdbScenesBase: {{ stashdb_scenes_base|tojson }},
@@ -394,6 +396,7 @@
     let splitState = {
       parts: parseInt(PAGE_DATA.splitParts, 10) || 0,
       basename: (PAGE_DATA.splitName || "").trim(),
+      mode: (PAGE_DATA.splitMode || PAGE_DATA.filesterSplitMode || "bytes").trim(),
     };
     let threadUrl = "";
     let filesterGalleryLink = (PAGE_DATA.galleryFilester || "").trim();
@@ -742,7 +745,8 @@
       const p = new URLSearchParams(window.location.search);
       const parts = parseInt(p.get("split_parts") || "0", 10) || 0;
       const basename = (p.get("split_name") || "").trim();
-      if (parts > 1) return { parts, basename };
+      const mode = (p.get("split_mode") || "").trim();
+      if (parts > 1) return { parts, basename, mode };
       return null;
     }
 
@@ -751,6 +755,7 @@
       splitState = {
         parts: next.parts,
         basename: (next.basename || activeFilename || "").trim(),
+        mode: (next.mode || PAGE_DATA.filesterSplitMode || "bytes").trim(),
       };
     }
 
@@ -781,12 +786,27 @@
       if (!(splitState.parts > 1)) return "";
       const { stem, ext, original } = splitBasenameParts(splitState.basename);
       if (!original) return "";
+      const mode = (splitState.mode || "bytes").toLowerCase();
+
+      if (mode === "ffmpeg") {
+        const listCmd = `printf "file '%s'\\n" ${stem}.PART*${ext} > parts.txt`;
+        const joinCmd = `ffmpeg -f concat -safe 0 -i parts.txt -c copy ${original}`;
+        return `
+
+[HEADING=2]Reassembly (split upload)[/HEADING]
+This file was split into ${splitState.parts} independently playable parts (ffmpeg stream-copy). Each part can be previewed before download. To restore the full file:
+
+[b]Linux / macOS / Windows[/b]
+[CODE]${listCmd}
+${joinCmd}[/CODE]`;
+      }
+
       const linuxCmd = `cat ${stem}.part*${ext} > ${original}`;
       const winCmd = windowsCopyCommand(stem, ext, splitState.parts, original);
       return `
 
 [HEADING=2]Reassembly (split upload)[/HEADING]
-This file was split into ${splitState.parts} parts because of Filester's 10 GB per-file limit. Download every part, then merge in order:
+This file was split into ${splitState.parts} byte-range parts (not playable until merged). Download every part, then merge in order:
 
 [b]Linux / macOS[/b]
 [CODE]${linuxCmd}[/CODE]
@@ -1208,6 +1228,7 @@ ${threadRow}${linkRow}${mirrorRow}${fallbackLinkRow}[/TABLE]${splitBlock}`;
           applySplitState({
             parts: split.part_count,
             basename: split.original_basename || fn,
+            mode: split.split_mode || "",
           });
         }
       } catch (_err) { /* optional */ }

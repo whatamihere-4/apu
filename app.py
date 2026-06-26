@@ -36,6 +36,7 @@ from upload_provider import (
     GOFILE_ENABLED,
     FILESTER_ENABLED,
     ACTIVE_PROVIDERS,
+    FILESTER_SPLIT_MODE,
 )
 from downloader import download_file, TransferCancelled
 from oshash_remote import fetch_oshash_from_url
@@ -737,6 +738,7 @@ def _bbcode_helper_url(
     gallery_filester: str | None = None,
     split_parts: int | None = None,
     split_name: str | None = None,
+    split_mode: str | None = None,
 ) -> str:
     """Build `/bbcode` query string with optional video dimensions from cache."""
     q = [
@@ -760,6 +762,8 @@ def _bbcode_helper_url(
         q.append(("split_parts", str(int(split_parts))))
         if split_name:
             q.append(("split_name", split_name))
+        if split_mode:
+            q.append(("split_mode", split_mode))
     return "/bbcode?" + urllib.parse.urlencode(q)
 
 
@@ -1543,6 +1547,7 @@ def bbcode_page():
     except (TypeError, ValueError):
         split_parts = 0
     split_name = (request.args.get("split_name") or "").strip()
+    split_mode = (request.args.get("split_mode") or "").strip()
     return render_template(
         "bbcode.html",
         scene_id=scene_id,
@@ -1551,8 +1556,10 @@ def bbcode_page():
         gallery_filester=gallery_filester,
         split_parts=split_parts,
         split_name=split_name,
+        split_mode=split_mode,
         active_providers=ACTIVE_PROVIDERS,
         filester_enabled=FILESTER_ENABLED,
+        filester_split_mode=FILESTER_SPLIT_MODE,
         stashdb_scenes_base=STASHDB_SCENES_BASE,
         jpg6_to_album=JPG6_TO_ALBUM,
     )
@@ -5471,6 +5478,7 @@ def api_upload_config():
         "gofile_enabled": GOFILE_ENABLED,
         "filester_enabled": FILESTER_ENABLED,
         "active_providers": ACTIVE_PROVIDERS,
+        "filester_split_mode": FILESTER_SPLIT_MODE,
     })
 
 
@@ -5627,6 +5635,7 @@ def _finalize_upload(
             split_info = {
                 "part_count": r.part_count,
                 "original_basename": r.original_basename,
+                "split_mode": r.split_mode or FILESTER_SPLIT_MODE,
             }
 
     if not gofile_urls and not filester_part_urls:
@@ -5681,6 +5690,7 @@ def _finalize_upload(
                 split={
                     "part_count": split_info["part_count"],
                     "original_basename": split_info["original_basename"],
+                    "split_mode": split_info.get("split_mode") or FILESTER_SPLIT_MODE,
                     "recorded_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
                 },
             )
@@ -5696,6 +5706,9 @@ def _finalize_upload(
             extra["split_parts"] = str(split_info["part_count"])
             if split_info.get("original_basename"):
                 extra["split_name"] = split_info["original_basename"]
+            mode = split_info.get("split_mode") or FILESTER_SPLIT_MODE
+            if mode:
+                extra["split_mode"] = mode
         if extra:
             sep = "&" if "?" in helper else "?"
             jobs[job_id]["stashdb_helper_url"] = helper + sep + urllib.parse.urlencode(extra)

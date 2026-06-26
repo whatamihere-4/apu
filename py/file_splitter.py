@@ -139,3 +139,61 @@ def split_file(
     raise SplitError(
         f"Unable to split {base} under {max_bytes:,} bytes after retries. Last: {last_err}"
     )
+
+
+def iter_upload_parts(
+    path: str,
+    max_bytes: int,
+    output_dir: str,
+    *,
+    on_log=None,
+    should_cancel=None,
+    delete_source: bool = True,
+    ffmpeg_timeout: int = 7200,
+):
+    """Yield part dicts compatible with byte_splitter (ffmpeg PART naming).
+
+    ffmpeg writes every part before upload begins, so peak disk is ~2× the file.
+    Parts are independently playable in web players; rejoin with ffmpeg concat.
+    """
+    size = os.path.getsize(path)
+    if size <= max_bytes:
+        yield {
+            "path": path,
+            "filename": os.path.basename(path),
+            "size_bytes": size,
+            "part_index": 0,
+            "part_count": 1,
+            "is_source": True,
+            "original_basename": os.path.basename(path),
+            "split_mode": "ffmpeg",
+        }
+        return
+
+    parts = split_file(
+        path,
+        max_bytes,
+        output_dir,
+        on_log=on_log,
+        should_cancel=should_cancel,
+        ffmpeg_timeout=ffmpeg_timeout,
+    )
+    original = os.path.basename(path)
+    part_count = len(parts)
+    for idx, part_path in enumerate(parts, start=1):
+        yield {
+            "path": part_path,
+            "filename": os.path.basename(part_path),
+            "size_bytes": os.path.getsize(part_path),
+            "part_index": idx,
+            "part_count": part_count,
+            "is_source": False,
+            "original_basename": original,
+            "split_mode": "ffmpeg",
+        }
+
+    if delete_source:
+        try:
+            os.remove(path)
+        except OSError:
+            pass

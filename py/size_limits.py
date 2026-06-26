@@ -47,8 +47,9 @@ def max_processable_source_bytes(
     *,
     download_dir: str,
     free_gb: float | None = None,
+    split_mode: str = "bytes",
 ) -> int:
-    """Largest single source file we can process (peak = source + one part + headroom)."""
+    """Largest single source file we can process on available disk."""
     if MAX_SOURCE_FILE_BYTES > 0:
         return MAX_SOURCE_FILE_BYTES
     if MAX_SOURCE_FILE_GB > 0:
@@ -59,15 +60,25 @@ def max_processable_source_bytes(
     else:
         budget_gb = free_gb if free_gb is not None else free_disk_gb(download_dir)
 
+    usable_gb = budget_gb - MIN_FREE_DISK_GB
+    if split_mode == "ffmpeg":
+        return int(max(0.0, usable_gb / 2.0) * _GIB)
     part_gb = part_size_bytes / _GIB
-    usable_gb = budget_gb - MIN_FREE_DISK_GB - part_gb
-    return int(max(0.0, usable_gb) * _GIB)
+    return int(max(0.0, usable_gb - part_gb) * _GIB)
 
 
-def required_disk_gb(file_size: int, part_size_bytes: int) -> float:
+def required_disk_gb(
+    file_size: int,
+    part_size_bytes: int,
+    *,
+    split_mode: str = "bytes",
+) -> float:
     if file_size <= 0:
         return float(MIN_FREE_DISK_GB)
-    return required_disk_bytes(file_size, part_size_bytes) / _GIB + MIN_FREE_DISK_GB
+    return (
+        required_disk_bytes(file_size, part_size_bytes, split_mode=split_mode) / _GIB
+        + MIN_FREE_DISK_GB
+    )
 
 
 def oversize_skip_reason(
@@ -75,10 +86,13 @@ def oversize_skip_reason(
     part_size_bytes: int,
     *,
     download_dir: str,
+    split_mode: str = "bytes",
 ) -> str | None:
     if not AUTO_SKIP_OVERSIZED or file_size <= 0:
         return None
-    limit = max_processable_source_bytes(part_size_bytes, download_dir=download_dir)
+    limit = max_processable_source_bytes(
+        part_size_bytes, download_dir=download_dir, split_mode=split_mode
+    )
     if limit <= 0:
         return "File size unknown or disk budget too small"
     if file_size > limit:
@@ -94,14 +108,18 @@ def insufficient_disk_reason(
     part_size_bytes: int,
     *,
     download_dir: str,
+    split_mode: str = "bytes",
 ) -> str | None:
     """Return an error message when free space is below what this file needs."""
-    need_gb = required_disk_gb(file_size, part_size_bytes)
+    need_gb = required_disk_gb(file_size, part_size_bytes, split_mode=split_mode)
     have_gb = free_disk_gb(download_dir)
     if have_gb < need_gb:
+        if split_mode == "ffmpeg":
+            detail = f"source + all parts (~2× file) + {MIN_FREE_DISK_GB:.0f} GiB headroom"
+        else:
+            detail = f"source + one part + {MIN_FREE_DISK_GB:.0f} GiB headroom"
         return (
-            f"Insufficient disk space: need {need_gb:.1f} GiB free "
-            f"(source + one part + {MIN_FREE_DISK_GB:.0f} GiB headroom), "
+            f"Insufficient disk space: need {need_gb:.1f} GiB free ({detail}), "
             f"have {have_gb:.1f} GiB"
         )
     return None

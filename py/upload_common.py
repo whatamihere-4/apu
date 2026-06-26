@@ -30,3 +30,4 @@ class UploadResult:
     part_count: int = 1
     original_basename: str = ""
     was_split: bool = False
+    split_mode: str = ""

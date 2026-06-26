@@ -18,12 +18,15 @@ class SplitError(RuntimeError):
     pass
 
 
-def required_disk_bytes(file_size: int, part_size_bytes: int) -> int:
-    """Peak bytes on disk while processing one job (source + at most one part)."""
+def required_disk_bytes(file_size: int, part_size_bytes: int, *, split_mode: str = "bytes") -> int:
+    """Peak bytes on disk while processing one job."""
     if file_size <= 0:
         return 0
     if file_size <= part_size_bytes:
         return file_size
+    if split_mode == "ffmpeg":
+        # ffmpeg segment muxer holds the source while writing every part (~2× file).
+        return file_size * 2
     return file_size + part_size_bytes
 
 
@@ -85,6 +88,7 @@ def iter_upload_parts(
             "part_count": 1,
             "is_source": True,
             "original_basename": source.name,
+            "split_mode": "bytes",
         }
         return
 
@@ -106,6 +110,7 @@ def iter_upload_parts(
             "part_count": num_parts,
             "is_source": False,
             "original_basename": source.name,
+            "split_mode": "bytes",
         }
 
     if delete_source:

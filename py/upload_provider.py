@@ -1,10 +1,8 @@
 """Upload orchestrator: one or both of GoFile and Filester.
 
 Enable providers independently via GOFILE_ENABLED / FILESTER_ENABLED, or the
-legacy UPLOAD_PROVIDER shorthand (gofile, filester, dual). Oversized Filester
-uploads use byte-range splitting (one part on disk at a time). When a file is
-too large for Filester splitting on disk, Filester is skipped and GoFile-only
-upload proceeds if enabled.
+legacy UPLOAD_PROVIDER shorthand (gofile, filester, dual). Filester oversized
+uploads split via FILESTER_SPLIT_MODE: bytes (fast splice) or ffmpeg (playable parts).
 """
 from __future__ import annotations
 
@@ -13,6 +11,7 @@ import shutil
 import uuid
 
 import byte_splitter
+import file_splitter
 import filester_upload
 import gofile_upload
 import size_limits
@@ -37,6 +36,19 @@ DOWNLOADS_DIR = os.path.realpath(
     (os.environ.get("MEDIA_DOWNLOADS_DIR") or "./downloads").rstrip("/") or "./downloads"
 )
 FILESTER_MAX_PART_BYTES = _env_int("FILESTER_MAX_PART_BYTES", 10_200_547_328)
+FILESTER_FFMPEG_TIMEOUT = _env_int("SPLITTER_FFMPEG_TIMEOUT_SEC", 7200)
+
+_raw_split_mode = (os.environ.get("FILESTER_SPLIT_MODE") or "bytes").strip().lower()
+if _raw_split_mode in ("splice", "byte", "bytes", "cat"):
+    FILESTER_SPLIT_MODE = "bytes"
+elif _raw_split_mode == "ffmpeg":
+    FILESTER_SPLIT_MODE = "ffmpeg"
+else:
+    print(
+        f"[UPLOAD] Unknown FILESTER_SPLIT_MODE={_raw_split_mode!r}; using bytes",
+        flush=True,
+    )
+    FILESTER_SPLIT_MODE = "bytes"
 
 _legacy = (os.environ.get("UPLOAD_PROVIDER") or "").strip().lower()
 if _legacy in ("dual", "both"):
@@ -85,6 +97,7 @@ def _normalize_filester(raw: dict, *, part: dict | None = None) -> UploadResult:
     part_index = 0
     original_basename = ""
     was_split = False
+    split_mode = str(part.get("split_mode") or "") if part else ""
     if part:
         part_count = int(part.get("part_count") or 1)
         part_index = int(part.get("part_index") or 0)
@@ -99,6 +112,7 @@ def _normalize_filester(raw: dict, *, part: dict | None = None) -> UploadResult:
         part_count=part_count,
         original_basename=original_basename,
         was_split=was_split,
+        split_mode=split_mode,
     )
 
 
@@ -130,13 +144,19 @@ def plan_upload_destinations(file_size: int) -> tuple[list[str], str | None]:
 
     if FILESTER_ENABLED:
         skip = size_limits.oversize_skip_reason(
-            file_size, FILESTER_MAX_PART_BYTES, download_dir=DOWNLOADS_DIR
+            file_size,
+            FILESTER_MAX_PART_BYTES,
+            download_dir=DOWNLOADS_DIR,
+            split_mode=FILESTER_SPLIT_MODE,
         )
         if skip:
             filester_skip = skip
         else:
             low = size_limits.insufficient_disk_reason(
-                file_size, FILESTER_MAX_PART_BYTES, download_dir=DOWNLOADS_DIR
+                file_size,
+                FILESTER_MAX_PART_BYTES,
+                download_dir=DOWNLOADS_DIR,
+                split_mode=FILESTER_SPLIT_MODE,
             )
             if low:
                 filester_skip = low
@@ -204,30 +224,46 @@ def _upload_filester_parts(
     out_dir = os.path.join(os.path.dirname(src) or ".", f".split_{token}")
     os.makedirs(out_dir, exist_ok=True)
     if on_log:
+        mode_label = (
+            "ffmpeg stream-copy (playable parts, ~2× disk during split)"
+            if FILESTER_SPLIT_MODE == "ffmpeg"
+            else "byte-range splice (one part on disk at a time)"
+        )
         on_log(
             f"[Filester] {os.path.basename(src)} is {format_size(size)} "
-            f"(> {format_size(FILESTER_MAX_PART_BYTES)}); "
-            f"splitting into byte-range parts (one part on disk at a time)"
+            f"(> {format_size(FILESTER_MAX_PART_BYTES)}); splitting via {mode_label}"
         )
-        need_gb = size_limits.required_disk_gb(size, FILESTER_MAX_PART_BYTES)
-        on_log(
-            f"[Filester] Split upload needs ~{need_gb:.1f} GiB peak disk "
-            f"(source + one {format_size(FILESTER_MAX_PART_BYTES)} part + headroom)"
+        need_gb = size_limits.required_disk_gb(
+            size, FILESTER_MAX_PART_BYTES, split_mode=FILESTER_SPLIT_MODE
         )
+        on_log(f"[Filester] Split upload needs ~{need_gb:.1f} GiB peak disk")
 
     def _skip_check():
         if should_cancel and should_cancel():
             raise TransferCancelled("Upload cancelled")
 
-    last_part: dict | None = None
-    try:
-        for part in byte_splitter.iter_upload_parts(
+    if FILESTER_SPLIT_MODE == "ffmpeg":
+        part_source = file_splitter.iter_upload_parts(
+            src,
+            FILESTER_MAX_PART_BYTES,
+            out_dir,
+            on_log=on_log,
+            should_cancel=should_cancel,
+            delete_source=delete_source,
+            ffmpeg_timeout=FILESTER_FFMPEG_TIMEOUT,
+        )
+    else:
+        part_source = byte_splitter.iter_upload_parts(
             src,
             out_dir,
             FILESTER_MAX_PART_BYTES,
             skip_check=_skip_check,
             delete_source=delete_source,
-        ):
+        )
+
+    last_part: dict | None = None
+    try:
+        for part in part_source:
             if should_cancel and should_cancel():
                 raise TransferCancelled("Upload cancelled")
             part_path = part["path"]
@@ -255,11 +291,19 @@ def _upload_filester_parts(
                 last_part.get("original_basename") or os.path.basename(src)
             )
             original = f"{stem}{ext}"
-            on_log(
-                f"[Filester] Split into {last_part['part_count']} parts. "
-                f"Linux: cat {stem}.part*{ext} > {original} | "
-                f"Windows: copy /b {stem}.part001{ext}+...+{original}"
-            )
+            mode = last_part.get("split_mode") or FILESTER_SPLIT_MODE
+            if mode == "ffmpeg":
+                on_log(
+                    f"[Filester] Split into {last_part['part_count']} playable parts. "
+                    f"Rejoin: printf \"file '%s'\\n\" {stem}.PART*{ext} > parts.txt && "
+                    f"ffmpeg -f concat -safe 0 -i parts.txt -c copy {original}"
+                )
+            else:
+                on_log(
+                    f"[Filester] Split into {last_part['part_count']} parts. "
+                    f"Linux: cat {stem}.part*{ext} > {original} | "
+                    f"Windows: copy /b {stem}.part001{ext}+...+{original}"
+                )
     finally:
         shutil.rmtree(out_dir, ignore_errors=True)
 
