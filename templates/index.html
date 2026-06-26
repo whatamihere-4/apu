@@ -237,6 +237,10 @@
     </select>
     <p id="folder-load-status" style="margin-top:0.35rem; display:none; color:var(--muted); font-size:0.8rem;"></p>
     <p id="folder-parity-warning" style="margin-top:0.35rem; display:none; color:var(--warn); font-size:0.8rem;"></p>
+    <div class="folder-row" id="filester-sync-row" style="margin-top:0.5rem; display:none;">
+      <button class="btn-sm" type="button" id="filester-sync-btn">Sync folders from Filester API</button>
+      <span id="filester-sync-hint" style="font-size:0.75rem; color:var(--muted);"></span>
+    </div>
     <div class="folder-row" id="create-folder-row" style="margin-top:0.6rem;">
       <input type="text" id="new-folder-name" placeholder="New folder name...">
       <button class="btn-sm" id="create-folder-btn">Create</button>
@@ -749,9 +753,11 @@
       const gofileRow = document.getElementById('existing-gofile-row');
       const filesterRow = document.getElementById('existing-filester-row');
       const createRow = document.getElementById('create-folder-row');
+      const syncRow = document.getElementById('filester-sync-row');
       if (gofileRow) gofileRow.style.display = gofileOn ? 'block' : 'none';
       if (filesterRow) filesterRow.style.display = filesterOn ? 'block' : 'none';
       if (createRow) createRow.style.display = gofileOn ? 'flex' : 'none';
+      if (syncRow) syncRow.style.display = filesterOn ? 'flex' : 'none';
     }
 
     async function loadUploadFolders(selectId) {
@@ -838,8 +844,31 @@
       try {
         const data = await api('/api/gofile_create_folder', { name, parent_id: parentId });
         document.getElementById('new-folder-name').value = '';
-        await loadGofileFolders(data.id);
+        await loadUploadFolders(data.id);
       } catch (e) { alert('Failed to create folder: ' + e.message); }
+      btn.disabled = false;
+    });
+
+    document.getElementById('filester-sync-btn').addEventListener('click', async () => {
+      const btn = document.getElementById('filester-sync-btn');
+      const hint = document.getElementById('filester-sync-hint');
+      btn.disabled = true;
+      if (hint) hint.textContent = 'Syncing…';
+      try {
+        const data = await api('/api/filester_sync_folders', { mode: 'replace' });
+        if (providerConfig) {
+          providerConfig.filester_folder_sync = {
+            last_at: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+            last_count: data.count || 0,
+            last_error: null,
+          };
+        }
+        updateFilesterSyncHint();
+        await loadUploadFolders();
+      } catch (e) {
+        if (hint) hint.textContent = '';
+        alert('Filester sync failed: ' + e.message);
+      }
       btn.disabled = false;
     });
 
@@ -870,7 +899,7 @@
         document.getElementById('existing-folder-name').value = '';
         document.getElementById('existing-gofile-folder').value = '';
         document.getElementById('existing-filester-folder').value = '';
-        await loadGofileFolders(selectId);
+        await loadUploadFolders(selectId);
       } catch (e) { alert('Failed to add folder: ' + e.message); }
       btn.disabled = false;
     });
@@ -955,6 +984,27 @@
       }
     }
 
+    function updateFilesterSyncHint() {
+      const hint = document.getElementById('filester-sync-hint');
+      if (!hint || !providerConfig) return;
+      const st = providerConfig.filester_folder_sync || {};
+      if (providerConfig.filester_folder_sync_enabled) {
+        const mins = Math.round((providerConfig.filester_folder_sync_interval_sec || 3600) / 60);
+        let text = `Auto-sync every ${mins} min`;
+        if (st.last_at) {
+          text += ` · last ${st.last_count || 0} folder(s) at ${st.last_at}`;
+        }
+        if (st.last_error) {
+          text += ` · error: ${st.last_error}`;
+        }
+        hint.textContent = text;
+      } else if (st.last_at) {
+        hint.textContent = `Last sync: ${st.last_count || 0} folder(s) at ${st.last_at}`;
+      } else {
+        hint.textContent = '';
+      }
+    }
+
     async function loadProviderConfig() {
       try {
         const cfg = await apiGet('/api/upload_config');
@@ -967,6 +1017,7 @@
         document.getElementById('destination-title').textContent = `${label} Destination`;
         document.getElementById('upload-btn').textContent = `Upload to ${label}`;
         updateFolderFormVisibility();
+        updateFilesterSyncHint();
       } catch (e) { console.error('[gofup] Failed to load provider config:', e); }
     }
 

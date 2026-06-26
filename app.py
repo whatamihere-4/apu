@@ -41,6 +41,7 @@ from upload_provider import (
     resolve_split_mode,
 )
 from downloader import download_file, TransferCancelled
+from filester_upload import fetch_folder_map_from_api
 from oshash_remote import fetch_oshash_from_url
 from queue_persist import track_add, track_remove
 from queue_api import register_queue_routes
@@ -184,6 +185,13 @@ STASHDB_AUTO_CONTRIBUTE = os.environ.get("STASHDB_AUTO_CONTRIBUTE", "1").strip()
     "false",
     "no",
     "off",
+)
+
+# Optional background sync of cache/filester-folders.json from GET /api/v1/folders.
+FILESTER_FOLDER_SYNC_ENABLED = _env_yes("FILESTER_FOLDER_SYNC_ENABLED", default="0")
+FILESTER_FOLDER_SYNC_INTERVAL_SEC = max(
+    60,
+    _env_int("FILESTER_FOLDER_SYNC_INTERVAL_SEC", 3600),
 )
 
 
@@ -343,6 +351,82 @@ def _save_filester_folders(folders):
         f"[FOLDERS] Saved {len(folders)} Filester folder(s) to {FILESTER_FOLDERS_FILE}",
         flush=True,
     )
+
+
+def _sync_filester_folders_from_api(*, mode: str = "replace") -> dict:
+    """Pull folders from Filester API into filester-folders.json.
+
+    mode: ``replace`` (API is source of truth) or ``merge`` (keep local-only ids).
+    """
+    remote = fetch_folder_map_from_api()
+    if mode == "merge":
+        merged = dict(_load_filester_folders())
+        merged.update(remote)
+        folders = merged
+    elif mode == "replace":
+        folders = remote
+    else:
+        raise ValueError(f"Unknown sync mode: {mode!r}")
+    _save_filester_folders(folders)
+    return {
+        "mode": mode,
+        "count": len(folders),
+        "from_api": len(remote),
+    }
+
+
+_filester_sync_lock = threading.Lock()
+_filester_sync_state: dict = {
+    "last_at": None,
+    "last_count": 0,
+    "last_error": None,
+}
+
+
+def _run_filester_folder_sync_once() -> bool:
+    """Sync Filester folders if enabled. Returns True when a sync ran."""
+    if not (FILESTER_ENABLED and FILESTER_FOLDER_SYNC_ENABLED):
+        return False
+    if not _filester_sync_lock.acquire(blocking=False):
+        return False
+    try:
+        summary = _sync_filester_folders_from_api(mode="replace")
+        _filester_sync_state["last_at"] = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        _filester_sync_state["last_count"] = int(summary.get("count") or 0)
+        _filester_sync_state["last_error"] = None
+        print(
+            f"[FOLDERS] Filester background sync: {summary.get('count', 0)} folder(s)",
+            flush=True,
+        )
+        return True
+    except Exception as exc:
+        _filester_sync_state["last_error"] = str(exc)
+        print(f"[FOLDERS] Filester background sync failed: {exc}", flush=True)
+        return False
+    finally:
+        _filester_sync_lock.release()
+
+
+def _filester_folder_sync_loop() -> None:
+    _run_filester_folder_sync_once()
+    while True:
+        time.sleep(FILESTER_FOLDER_SYNC_INTERVAL_SEC)
+        _run_filester_folder_sync_once()
+
+
+def _start_filester_folder_sync_background() -> None:
+    if not (FILESTER_ENABLED and FILESTER_FOLDER_SYNC_ENABLED):
+        return
+    print(
+        f"[FOLDERS] Filester background sync enabled "
+        f"(every {FILESTER_FOLDER_SYNC_INTERVAL_SEC}s)",
+        flush=True,
+    )
+    threading.Thread(
+        target=_filester_folder_sync_loop,
+        daemon=True,
+        name="filester-folder-sync",
+    ).start()
 
 
 def _parse_gofile_folder_id(raw: str) -> str:
@@ -5591,6 +5675,9 @@ def api_upload_config():
         "active_providers": ACTIVE_PROVIDERS,
         "filester_split_mode": FILESTER_SPLIT_MODE,
         "filester_split_fallback": FILESTER_SPLIT_FALLBACK,
+        "filester_folder_sync_enabled": FILESTER_FOLDER_SYNC_ENABLED,
+        "filester_folder_sync_interval_sec": FILESTER_FOLDER_SYNC_INTERVAL_SEC,
+        "filester_folder_sync": dict(_filester_sync_state),
     })
 
 
@@ -5624,6 +5711,34 @@ def api_filester_folders():
     sorted_folders = sorted(folders.items(), key=lambda item: item[1].casefold())
     result = [{"id": fid, "name": name} for fid, name in sorted_folders]
     return jsonify({"folders": result})
+
+
+@app.route("/api/filester_sync_folders", methods=["POST"])
+def api_filester_sync_folders():
+    """Refresh cache/filester-folders.json from GET /api/v1/folders."""
+    if not FILESTER_ENABLED:
+        return jsonify({"error": "Filester uploads are not enabled"}), 400
+    data = request.get_json(silent=True) or {}
+    mode = (data.get("mode") or "replace").strip().lower()
+    if mode not in ("replace", "merge"):
+        return jsonify({"error": "mode must be replace or merge"}), 400
+    try:
+        if not _filester_sync_lock.acquire(blocking=False):
+            return jsonify({"error": "Filester folder sync already in progress"}), 409
+        try:
+            summary = _sync_filester_folders_from_api(mode=mode)
+            _filester_sync_state["last_at"] = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+            _filester_sync_state["last_count"] = int(summary.get("count") or 0)
+            _filester_sync_state["last_error"] = None
+        finally:
+            _filester_sync_lock.release()
+        folders = _load_filester_folders()
+        sorted_folders = sorted(folders.items(), key=lambda item: item[1].casefold())
+        result = [{"id": fid, "name": name} for fid, name in sorted_folders]
+        return jsonify({"ok": True, **summary, "folders": result})
+    except Exception as e:
+        print(f"[API] Filester folder sync failed: {e}", flush=True)
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/folder_parity")
@@ -5798,7 +5913,7 @@ def _finalize_upload(
 
     gofile_url = gofile_urls[0] if gofile_urls else ""
     if filester_part_urls:
-        if split_info and filester_folder_id:
+        if filester_folder_id:
             filester_url = folder_url(filester_folder_id, provider="filester")
         else:
             filester_url = filester_part_urls[0]
@@ -6147,6 +6262,8 @@ _restore_pending_queue = register_queue_routes(
     start_link_job=_start_link_job,
     start_path_job=_start_path_job,
 )
+
+_start_filester_folder_sync_background()
 
 
 if __name__ == "__main__":

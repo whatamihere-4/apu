@@ -29,13 +29,46 @@ def _auth_headers():
     return h
 
 
+def _flatten_folder_rows(rows: list, out: dict[str, str]) -> None:
+    """Recursively collect {id: name} from Filester folder list payloads."""
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        fid = str(item.get("id") or item.get("identifier") or "").strip()
+        name = str(item.get("name") or "").strip()
+        if fid and name:
+            out[fid] = name
+        for child_key in ("children", "folders", "subfolders"):
+            children = item.get(child_key)
+            if isinstance(children, list) and children:
+                _flatten_folder_rows(children, out)
+
+
+def fetch_folder_map_from_api() -> dict[str, str]:
+    """Download the account folder map from GET /api/v1/folders."""
+    if not FILESTER_API_KEY:
+        raise RuntimeError("FILESTER_API_KEY is not set")
+    url = f"{FILESTER_BASE_URL}/api/v1/folders"
+    r = requests.get(url, headers=_auth_headers(), timeout=60)
+    r.raise_for_status()
+    body = r.json()
+    if not body.get("success"):
+        raise RuntimeError(f"Filester folders API failed: {body}")
+    rows = body.get("data")
+    if not isinstance(rows, list):
+        raise RuntimeError(f"Unexpected Filester folders response: {body!r}")
+    out: dict[str, str] = {}
+    _flatten_folder_rows(rows, out)
+    return out
+
+
 def get_root_folder_id():
     """Filester has no root-folder concept; an empty folder id uploads to root."""
     return ""
 
 
 def create_folder(parent_id, name):
-    """Create a folder. Filester folders are flat (no parent in the create API)."""
+    """Create a top-level folder (Filester API does not nest via parent_id today)."""
     r = requests.post(
         f"{FILESTER_BASE_URL}/api/v1/folder",
         headers=_auth_headers(),
