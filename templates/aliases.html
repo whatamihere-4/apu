@@ -130,6 +130,21 @@
       <h2 style="margin:0 0 0.75rem;font-size:1rem;">Saved aliases</h2>
       <div id="alias-table-wrap">Loading…</div>
     </section>
+
+    <section class="card">
+      <h2 style="margin:0 0 0.75rem;font-size:1rem;">Studio threads (optional)</h2>
+      <p class="subtitle" style="margin-top:0;margin-bottom:0.75rem;">
+        Optional forum thread URL per StashDB studio. When set, BBCode posts get a Thread row.
+        Stored in <code>cache/studio_threads.json</code> — not required.
+      </p>
+      <label for="thread-studio">StashDB studio name</label>
+      <input type="text" id="thread-studio" placeholder="CzechVR" autocomplete="off">
+      <label for="thread-url">Thread URL</label>
+      <input type="url" id="thread-url" placeholder="https://forum.example.com/threads/12345/">
+      <button type="button" class="btn" id="thread-save-btn">Save thread</button>
+      <div id="thread-status"></div>
+      <div id="thread-table-wrap" style="margin-top:1rem;">Loading…</div>
+    </section>
   </div>
 
   <script>
@@ -139,6 +154,11 @@
     const saveBtn = document.getElementById("save-btn");
     const statusEl = document.getElementById("status");
     const tableWrapEl = document.getElementById("alias-table-wrap");
+    const threadStudioEl = document.getElementById("thread-studio");
+    const threadUrlEl = document.getElementById("thread-url");
+    const threadSaveBtn = document.getElementById("thread-save-btn");
+    const threadStatusEl = document.getElementById("thread-status");
+    const threadTableWrapEl = document.getElementById("thread-table-wrap");
 
     function setStatus(kind, msg) {
       statusEl.className = kind || "";
@@ -271,10 +291,103 @@
       }
     });
 
+    function setThreadStatus(kind, msg) {
+      threadStatusEl.className = kind || "";
+      threadStatusEl.textContent = msg || "";
+    }
+
+    async function loadThreads() {
+      const r = await fetch("/api/studio_threads");
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+      const rows = data.threads || [];
+      if (!rows.length) {
+        threadTableWrapEl.innerHTML = '<p style="color:var(--muted);margin:0;">No studio threads yet.</p>';
+        return;
+      }
+      threadTableWrapEl.innerHTML = `
+        <table>
+          <thead>
+            <tr>
+              <th>StashDB studio</th>
+              <th>Thread URL</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.map((row) => `
+              <tr data-key="${esc(row.key)}">
+                <td>${esc(row.stashdb_studio)}</td>
+                <td style="word-break:break-all;">${esc(row.thread_url)}</td>
+                <td class="row-actions">
+                  <button type="button" class="btn secondary btn-thread-edit">Edit</button>
+                  <button type="button" class="btn danger btn-thread-del">Delete</button>
+                </td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>`;
+      threadTableWrapEl.querySelectorAll(".btn-thread-edit").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const tr = btn.closest("tr");
+          const cells = tr.querySelectorAll("td");
+          threadStudioEl.value = cells[0].textContent;
+          threadUrlEl.value = cells[1].textContent;
+          threadStudioEl.focus();
+        });
+      });
+      threadTableWrapEl.querySelectorAll(".btn-thread-del").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const key = btn.closest("tr").dataset.key;
+          if (!confirm("Delete this thread link?")) return;
+          try {
+            const r = await fetch("/api/studio_threads", {
+              method: "DELETE",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ key }),
+            });
+            const data = await r.json();
+            if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+            await loadThreads();
+            setThreadStatus("ok", "Deleted.");
+          } catch (err) {
+            setThreadStatus("err", err.message || "Delete failed.");
+          }
+        });
+      });
+    }
+
+    threadSaveBtn.addEventListener("click", async () => {
+      const stashdb_studio = threadStudioEl.value.trim();
+      const thread_url = threadUrlEl.value.trim();
+      if (!stashdb_studio || !thread_url) {
+        setThreadStatus("err", "Studio name and thread URL are required.");
+        return;
+      }
+      threadSaveBtn.disabled = true;
+      setThreadStatus("", "Saving…");
+      try {
+        const r = await fetch("/api/studio_threads", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ stashdb_studio, thread_url }),
+        });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+        await loadThreads();
+        setThreadStatus("ok", "Saved.");
+      } catch (err) {
+        setThreadStatus("err", err.message || "Save failed.");
+      } finally {
+        threadSaveBtn.disabled = false;
+      }
+    });
+
     (async function init() {
       try {
         await loadFolders();
         await loadAliases();
+        await loadThreads();
       } catch (err) {
         setStatus("err", err.message || "Load failed.");
       }

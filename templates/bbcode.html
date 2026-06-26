@@ -382,10 +382,21 @@
       sceneId: {{ scene_id|tojson }},
       filename: {{ filename|tojson }},
       gallery: {{ gallery|tojson }},
+      galleryFilester: {{ gallery_filester|tojson }},
+      splitParts: {{ split_parts|tojson }},
+      splitName: {{ split_name|tojson }},
+      activeProviders: {{ active_providers|tojson }},
+      filesterEnabled: {{ filester_enabled|tojson }},
       stashdbScenesBase: {{ stashdb_scenes_base|tojson }},
     };
     let activeFilename = (PAGE_DATA.filename || "").trim();
     let activeSceneId = (PAGE_DATA.sceneId || "").trim();
+    let splitState = {
+      parts: parseInt(PAGE_DATA.splitParts, 10) || 0,
+      basename: (PAGE_DATA.splitName || "").trim(),
+    };
+    let threadUrl = "";
+    let filesterGalleryLink = (PAGE_DATA.galleryFilester || "").trim();
     const cachedFileByName = new Map();
 
     const actressListEl = document.getElementById("actress-list");
@@ -727,6 +738,66 @@
       return (p.get("gallery") || "").trim();
     }
 
+    function parseSplitFromQuery() {
+      const p = new URLSearchParams(window.location.search);
+      const parts = parseInt(p.get("split_parts") || "0", 10) || 0;
+      const basename = (p.get("split_name") || "").trim();
+      if (parts > 1) return { parts, basename };
+      return null;
+    }
+
+    function applySplitState(next) {
+      if (!next || !(next.parts > 1)) return;
+      splitState = {
+        parts: next.parts,
+        basename: (next.basename || activeFilename || "").trim(),
+      };
+    }
+
+    function splitBasenameParts(name) {
+      const base = (name || splitState.basename || activeFilename || "").trim();
+      const dot = base.lastIndexOf(".");
+      if (dot > 0) return { stem: base.slice(0, dot), ext: base.slice(dot), original: base };
+      return { stem: base, ext: "", original: base };
+    }
+
+    function windowsCopyCommand(stem, ext, partCount, original) {
+      const chunks = [];
+      for (let i = 1; i <= partCount; i++) {
+        chunks.push(`${stem}.part${String(i).padStart(3, "0")}${ext}`);
+      }
+      return `copy /b ${chunks.join("+")} ${original}`;
+    }
+
+    function parseGalleryFilesterFromQuery() {
+      const p = new URLSearchParams(window.location.search);
+      return (p.get("gallery_filester") || "").trim();
+    }
+
+    function splitReassemblyBbcode() {
+      const providers = PAGE_DATA.activeProviders || [];
+      const filesterOn = PAGE_DATA.filesterEnabled || providers.includes("filester");
+      if (!filesterOn) return "";
+      if (!(splitState.parts > 1)) return "";
+      const { stem, ext, original } = splitBasenameParts(splitState.basename);
+      if (!original) return "";
+      const linuxCmd = `cat ${stem}.part*${ext} > ${original}`;
+      const winCmd = windowsCopyCommand(stem, ext, splitState.parts, original);
+      return `
+
+[HEADING=2]Reassembly (split upload)[/HEADING]
+This file was split into ${splitState.parts} parts because of Filester's 10 GB per-file limit. Download every part, then merge in order:
+
+[b]Linux / macOS[/b]
+[CODE]${linuxCmd}[/CODE]
+
+[b]Windows (Command Prompt)[/b]
+[CODE]${winCmd}[/CODE]
+
+[b]Windows (PowerShell)[/b]
+[CODE]cmd /c ${winCmd}[/CODE]`;
+    }
+
     function composeBbcode() {
       const actressPart = actressHeadingPart();
       const title = fields["title"].value.trim();
@@ -738,9 +809,37 @@
       const uploadDate = fields["upload-date"].value.trim();
       const studio = fields["studio"].value.trim();
       const galleryLink = fields["gallery-link"].value.trim();
-      const linkCell = galleryLink
+      const gofileCell = galleryLink
         ? `[URL unfurl="false"]${galleryLink}[/URL]`
         : "";
+      const mirrorCell = filesterGalleryLink
+        ? `[URL]${filesterGalleryLink}[/URL]`
+        : "";
+      const linkRow = galleryLink
+        ? `[TR]
+[td width="25%"]Link[/td][td width="75%"]${gofileCell}[/td]
+[/TR]
+`
+        : "";
+      const mirrorRow = filesterGalleryLink
+        ? `[TR]
+[td width="25%"]Mirror[/td][td width="75%"]${mirrorCell}[/td]
+[/TR]
+`
+        : "";
+      const fallbackLinkRow = !galleryLink && filesterGalleryLink
+        ? `[TR]
+[td width="25%"]Link[/td][td width="75%"]${mirrorCell}[/td]
+[/TR]
+`
+        : "";
+      const threadRow = threadUrl
+        ? `[TR]
+[td width="25%"]Thread[/td][td width="75%"][URL unfurl="false"]${threadUrl}[/URL][/td]
+[/TR]
+`
+        : "";
+      const splitBlock = splitReassemblyBbcode();
 
       const output = `[HEADING=1]${actressPart} - ${title}[/HEADING]
 ${imageBbcode}
@@ -754,10 +853,7 @@ ${imageBbcode}
 [TR]
 [td width="25%"]Studio[/td][td width="75%"]${studio}[/td]
 [/TR]
-[TR]
-[td width="25%"]Link[/td][td width="75%"]${linkCell}[/td]
-[/TR]
-[/TABLE]`;
+${threadRow}${linkRow}${mirrorRow}${fallbackLinkRow}[/TABLE]${splitBlock}`;
       outputEl.value = output;
     }
 
@@ -1064,6 +1160,8 @@ ${imageBbcode}
         const data = await r.json();
         if (!r.ok || data.error) return null;
         if (data.studio) fields["studio"].value = data.studio;
+        if (data.thread_url) threadUrl = data.thread_url;
+        if (data.filester_gallery_link) filesterGalleryLink = data.filester_gallery_link;
         const fillGallery = opts.fillGallery !== false;
         if (fillGallery && data.gallery_link && !fields["gallery-link"].value.trim()) {
           fields["gallery-link"].value = data.gallery_link;
@@ -1097,8 +1195,20 @@ ${imageBbcode}
         if (bb.gallery_link && !fields["gallery-link"].value.trim()) {
           fields["gallery-link"].value = bb.gallery_link;
         }
+        const upload = (data.entry && data.entry.upload) || {};
+        if (upload.gofile_url && !fields["gallery-link"].value.trim()) {
+          fields["gallery-link"].value = upload.gofile_url;
+        }
+        if (upload.filester_url) filesterGalleryLink = upload.filester_url;
         if (bb.stashdb_url && !stashdbLinkEl.value.trim()) {
           stashdbLinkEl.value = bb.stashdb_url;
+        }
+        const split = (data.entry && data.entry.split) || {};
+        if (split.part_count > 1) {
+          applySplitState({
+            parts: split.part_count,
+            basename: split.original_basename || fn,
+          });
         }
       } catch (_err) { /* optional */ }
     }
@@ -1274,6 +1384,8 @@ ${imageBbcode}
         fields["title"].value = data.title || "";
         fields["upload-date"].value = data.upload_date || "";
         fields["studio"].value = data.studio || "";
+        if (data.thread_url) threadUrl = data.thread_url;
+        if (data.filester_gallery_link) filesterGalleryLink = data.filester_gallery_link;
         if (data.gallery_link && !fields["gallery-link"].value.trim()) {
           fields["gallery-link"].value = data.gallery_link;
         }
@@ -1418,6 +1530,10 @@ ${imageBbcode}
       if (galleryFromQuery && !fields["gallery-link"].value.trim()) {
         fields["gallery-link"].value = galleryFromQuery;
       }
+      const filesterFromQuery = PAGE_DATA.galleryFilester || parseGalleryFilesterFromQuery();
+      if (filesterFromQuery) filesterGalleryLink = filesterFromQuery;
+      const splitFromQuery = parseSplitFromQuery();
+      if (splitFromQuery) applySplitState(splitFromQuery);
       await loadCachedFilesList(activeFilename);
       if (activeFilename) {
         await applyCachedFileSelection(activeFilename, {

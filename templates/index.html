@@ -447,12 +447,31 @@
 
       if (job.status === 'done') {
         statusEl.className = 'job-status done';
-        const link = job.download_page || '';
-        const lines = [
-          link
-            ? `Done &mdash; <a class="job-link" href="${escHtml(link)}" target="_blank">${escHtml(link)}</a>`
-            : 'Done',
-        ];
+        const lines = [];
+        const gf = job.download_page_gofile || '';
+        const fs = job.download_page_filester || '';
+        const legacy = job.download_page || '';
+        if (gf) {
+          lines.push(
+            `GoFile &mdash; <a class="job-link" href="${escHtml(gf)}" target="_blank">${escHtml(gf)}</a>`
+          );
+        }
+        if (fs) {
+          lines.push(
+            `Filester &mdash; <a class="job-link" href="${escHtml(fs)}" target="_blank">${escHtml(fs)}</a>`
+          );
+        }
+        if (!gf && !fs && legacy) {
+          lines.push(
+            `Done &mdash; <a class="job-link" href="${escHtml(legacy)}" target="_blank">${escHtml(legacy)}</a>`
+          );
+        }
+        if (!lines.length) lines.push('Done');
+        if (job.filester_skipped_reason) {
+          lines.push(
+            `<span class="muted small">Filester skipped: ${escHtml(job.filester_skipped_reason)}</span>`
+          );
+        }
         if (job.stashdb_match && job.stashdb_helper_url) {
           const m = job.stashdb_match;
           const sceneTitle = m.title ? escHtml(m.title) : '(StashDB scene)';
@@ -840,9 +859,10 @@
       try {
         const cfg = await apiGet('/api/upload_config');
         const label = cfg.label || 'Upload';
+        const active = (cfg.active_providers || []).join(' + ') || label;
         document.title = `gofup — ${label}`;
         document.getElementById('provider-subtitle').innerHTML =
-          `Upload to ${label} &mdash; from link or file`;
+          `Upload to ${escHtml(active)} &mdash; from link or file`;
         document.getElementById('destination-title').textContent = `${label} Destination`;
         document.getElementById('upload-btn').textContent = `Upload to ${label}`;
       } catch (e) { console.error('[gofup] Failed to load provider config:', e); }

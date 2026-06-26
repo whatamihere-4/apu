@@ -33,6 +33,9 @@ from upload_provider import (
     folder_url,
     UPLOAD_PROVIDER,
     PROVIDER_LABEL,
+    GOFILE_ENABLED,
+    FILESTER_ENABLED,
+    ACTIVE_PROVIDERS,
 )
 from downloader import download_file, TransferCancelled
 from oshash_remote import fetch_oshash_from_url
@@ -97,10 +100,15 @@ HASHES_DIR = os.path.realpath(
     or os.path.join(APP_DIR, "cache")
 )
 FOLDERS_FILE = os.path.join(HASHES_DIR, "folders.json")
+FILESTER_FOLDERS_FILE = (
+    (os.environ.get("FILESTER_FOLDERS_FILE") or "").strip()
+    or os.path.join(HASHES_DIR, "filester-folders.json")
+)
 SCENES_FILE = os.path.join(HASHES_DIR, "scenes.json")
 _LEGACY_HASHES_FILE = os.path.join(HASHES_DIR, "hashes.json")
 PERFORMERS_FILE = os.path.join(HASHES_DIR, "performers.json")
 STUDIO_ALIASES_FILE = os.path.join(HASHES_DIR, "studio_aliases.json")
+STUDIO_THREADS_FILE = os.path.join(HASHES_DIR, "studio_threads.json")
 RESOLUTION_PRESETS_FILE = os.path.join(HASHES_DIR, "resolution_presets.json")
 THUMBER_COMPOSE_FILE = os.environ.get(
     "THUMBER_COMPOSE_FILE", "/app/docker-compose.yml"
@@ -269,10 +277,10 @@ def _enqueue(job_id, func):
 _gofile_root_id = None
 
 
-def _load_folders():
-    """Read folders.json from disk. Returns {id: name, ...}."""
+def _load_gofile_folders():
+    """GoFile folder map from cache/folders.json."""
     try:
-        with open(FOLDERS_FILE, "r") as f:
+        with open(FOLDERS_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
         if isinstance(data, dict):
             return data
@@ -281,12 +289,29 @@ def _load_folders():
     return {}
 
 
+def _load_filester_folders():
+    """Filester folder map from cache/filester-folders.json."""
+    try:
+        with open(FILESTER_FOLDERS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    return {}
+
+
+def _load_folders():
+    """Backward-compatible alias: GoFile folder map."""
+    return _load_gofile_folders()
+
+
 def _save_folders(folders):
-    """Write folders.json to disk."""
+    """Write GoFile folder map to cache/folders.json."""
     os.makedirs(HASHES_DIR, exist_ok=True)
-    with open(FOLDERS_FILE, "w") as f:
+    with open(FOLDERS_FILE, "w", encoding="utf-8") as f:
         json.dump(folders, f, indent=2, sort_keys=True)
-    print(f"[FOLDERS] Saved {len(folders)} folder(s) to {FOLDERS_FILE}", flush=True)
+    print(f"[FOLDERS] Saved {len(folders)} GoFile folder(s) to {FOLDERS_FILE}", flush=True)
 
 
 def _folder_match_key(label: str) -> str:
@@ -336,6 +361,41 @@ def _strip_vr_from_label(label: str) -> str:
     return re.sub(r"VR", "", s).strip()
 
 
+def _folder_id_search(
+    folders: dict,
+    label: str,
+    *,
+    strip_vr: bool = False,
+) -> tuple[str | None, str | None, str | None]:
+    """Match a label against a folder map. Returns (folder_id, match_mode, matched_label)."""
+    label = str(label or "").strip()
+    if not label:
+        return None, None, None
+    candidates: list[str] = [label]
+    if strip_vr:
+        vr_label = _strip_vr_from_label(label)
+        if vr_label and vr_label != label:
+            candidates.append(vr_label)
+
+    for needle in candidates:
+        needle_fold = needle.casefold()
+        for folder_id, folder_label in folders.items():
+            if not isinstance(folder_label, str):
+                continue
+            cand = folder_label.strip()
+            if cand.casefold() == needle_fold:
+                return folder_id, "exact", cand
+        norm_needle = _folder_match_key(needle)
+        if not norm_needle:
+            continue
+        for folder_id, folder_label in folders.items():
+            if not isinstance(folder_label, str):
+                continue
+            if _folder_match_key(folder_label) == norm_needle:
+                return folder_id, "normalized", folder_label.strip()
+    return None, None, None
+
+
 def _gofile_folder_url_for_label(label: str) -> tuple[str | None, str | None]:
     """Resolve a GoFile gallery URL from `folders.json` by folder display name.
 
@@ -346,7 +406,7 @@ def _gofile_folder_url_for_label(label: str) -> tuple[str | None, str | None]:
     needle = label.strip()
     if not needle:
         return None, None
-    folders = _load_folders()
+    folders = _load_gofile_folders()
     needle_fold = needle.casefold()
     for folder_id, folder_label in folders.items():
         if not isinstance(folder_label, str):
@@ -368,38 +428,38 @@ def _gofile_folder_url_for_label(label: str) -> tuple[str | None, str | None]:
 def _gofile_folder_url_search(
     label: str, *, strip_vr: bool = False
 ) -> tuple[str | None, str | None, str | None]:
-    """Match a label against ``folders.json``.
-
-    Order: exact (casefold), whitespace-normalized, then optional VR-stripped variants.
-    Returns ``(url, match_mode, matched_folder_label)``.
-    """
-    label = str(label or "").strip()
-    if not label:
+    """Match a label against GoFile ``folders.json``."""
+    folder_id, match_mode, matched_label = _folder_id_search(
+        _load_gofile_folders(), label, strip_vr=strip_vr
+    )
+    if not folder_id:
         return None, None, None
-    folders = _load_folders()
-    candidates: list[str] = [label]
-    if strip_vr:
-        vr_label = _strip_vr_from_label(label)
-        if vr_label and vr_label != label:
-            candidates.append(vr_label)
+    return folder_url(folder_id, provider="gofile"), match_mode, matched_label
 
-    for needle in candidates:
-        needle_fold = needle.casefold()
-        for folder_id, folder_label in folders.items():
-            if not isinstance(folder_label, str):
-                continue
-            cand = folder_label.strip()
-            if cand.casefold() == needle_fold:
-                return folder_url(folder_id), "exact", cand
-        norm_needle = _folder_match_key(needle)
-        if not norm_needle:
-            continue
-        for folder_id, folder_label in folders.items():
-            if not isinstance(folder_label, str):
-                continue
-            if _folder_match_key(folder_label) == norm_needle:
-                return folder_url(folder_id), "normalized", folder_label.strip()
-    return None, None, None
+
+def _filester_folder_url_search(
+    label: str, *, strip_vr: bool = False
+) -> tuple[str | None, str | None, str | None]:
+    """Match a label against Filester folder map."""
+    folder_id, match_mode, matched_label = _folder_id_search(
+        _load_filester_folders(), label, strip_vr=strip_vr
+    )
+    if not folder_id:
+        return None, None, None
+    return folder_url(folder_id, provider="filester"), match_mode, matched_label
+
+
+def _resolve_filester_folder_id(gofile_folder_id: str | None) -> str | None:
+    """Map a GoFile folder picker ID to a Filester folder ID by display name."""
+    if not gofile_folder_id:
+        return None
+    label = (_load_gofile_folders().get(gofile_folder_id) or "").strip()
+    if not label:
+        return None
+    folder_id, _mode, _matched = _folder_id_search(
+        _load_filester_folders(), label, strip_vr=True
+    )
+    return folder_id
 
 
 def _gofile_folder_url_for_display_name(display_name: str) -> str | None:
@@ -429,6 +489,51 @@ def _studio_aliases_save(data):
 
 def _studio_alias_key(stashdb_studio: str) -> str:
     return re.sub(r"\s+", " ", str(stashdb_studio or "").strip()).lower()
+
+
+def _studio_threads_load():
+    try:
+        with open(STUDIO_THREADS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    return {}
+
+
+def _studio_threads_save(data):
+    os.makedirs(HASHES_DIR, exist_ok=True)
+    tmp = STUDIO_THREADS_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, sort_keys=True)
+    os.replace(tmp, STUDIO_THREADS_FILE)
+
+
+def _studio_thread_key(stashdb_studio: str) -> str:
+    return _studio_alias_key(stashdb_studio)
+
+
+def _studio_thread_lookup(stashdb_studio: str) -> str | None:
+    """Optional forum thread URL for a StashDB studio name."""
+    needle = _studio_thread_key(stashdb_studio)
+    if not needle:
+        return None
+    store = _studio_threads_load()
+    row = store.get(needle)
+    if isinstance(row, dict):
+        url = (row.get("thread_url") or "").strip()
+        if url:
+            return url
+    for key, row in store.items():
+        if not isinstance(row, dict):
+            continue
+        sd = (row.get("stashdb_studio") or key or "").strip().casefold()
+        if sd == needle:
+            url = (row.get("thread_url") or "").strip()
+            if url:
+                return url
+    return None
 
 
 def _resolution_preset_key(width: int, height: int) -> str:
@@ -533,11 +638,32 @@ def _resolve_studio_for_autofill(
             return f"{substudio} / {network}"
         return substudio
 
+    def _attach_thread() -> None:
+        thread_url = _studio_thread_lookup(substudio)
+        if not thread_url and network:
+            thread_url = _studio_thread_lookup(network)
+        if thread_url:
+            meta["thread_url"] = thread_url
+
+    def _attach_filester_gallery() -> None:
+        if not FILESTER_ENABLED:
+            return
+        fs_url, fs_mode, fs_label = _filester_folder_url_search(substudio, strip_vr=True)
+        if not fs_url and network:
+            fs_url, fs_mode, fs_label = _filester_folder_url_search(network, strip_vr=False)
+        if fs_url:
+            meta["filester_gallery_link"] = fs_url
+            meta["filester_folder_match"] = fs_mode
+            if fs_label:
+                meta["filester_folder_label"] = fs_label
+
     gallery, match_mode, matched_label = _gofile_folder_url_search(substudio, strip_vr=True)
     if gallery:
         meta["folder_match"] = match_mode
         meta["folder_label"] = matched_label
         meta["matched_level"] = "studio"
+        _attach_thread()
+        _attach_filester_gallery()
         return substudio, gallery, meta
 
     if network:
@@ -546,6 +672,8 @@ def _resolve_studio_for_autofill(
             meta["folder_match"] = match_mode
             meta["folder_label"] = matched_label
             meta["matched_level"] = "network"
+            _attach_thread()
+            _attach_filester_gallery()
             return _display_with_network(), gallery, meta
 
     studio_out = _display_with_network()
@@ -566,6 +694,9 @@ def _resolve_studio_for_autofill(
         display = (alias.get("studio_display") or "").strip()
         if display:
             studio_out = display
+
+    _attach_thread()
+    _attach_filester_gallery()
     return studio_out, gallery, meta
 
 
@@ -588,6 +719,12 @@ def api_resolve_studio():
     if gallery_url:
         payload["gallery_link"] = gallery_url
         payload["gallery_match"] = meta.get("folder_match")
+    fs_gallery = meta.get("filester_gallery_link")
+    if fs_gallery:
+        payload["filester_gallery_link"] = fs_gallery
+    thread_url = meta.get("thread_url")
+    if thread_url:
+        payload["thread_url"] = thread_url
     return jsonify(payload)
 
 
@@ -596,6 +733,10 @@ def _bbcode_helper_url(
     filename: str,
     entry: dict | None = None,
     gallery_link: str | None = None,
+    *,
+    gallery_filester: str | None = None,
+    split_parts: int | None = None,
+    split_name: str | None = None,
 ) -> str:
     """Build `/bbcode` query string with optional video dimensions from cache."""
     q = [
@@ -613,6 +754,12 @@ def _bbcode_helper_url(
             pass
     if gallery_link:
         q.append(("gallery", gallery_link))
+    if gallery_filester:
+        q.append(("gallery_filester", gallery_filester))
+    if split_parts and int(split_parts) > 1:
+        q.append(("split_parts", str(int(split_parts))))
+        if split_name:
+            q.append(("split_name", split_name))
     return "/bbcode?" + urllib.parse.urlencode(q)
 
 
@@ -942,7 +1089,7 @@ def _maybe_delete_remote_download(path: str | None) -> None:
 def _folder_display_name(folder_id):
     if not folder_id:
         return "Root"
-    folders = _load_folders()
+    folders = _load_gofile_folders()
     return folders.get(folder_id, folder_id[:12])
 
 
@@ -1389,11 +1536,23 @@ def bbcode_page():
     scene_id = (request.args.get("scene_id") or "").strip()
     filename = (request.args.get("filename") or "").strip()
     gallery = (request.args.get("gallery") or "").strip()
+    gallery_filester = (request.args.get("gallery_filester") or "").strip()
+    split_parts = 0
+    try:
+        split_parts = int((request.args.get("split_parts") or "0").strip())
+    except (TypeError, ValueError):
+        split_parts = 0
+    split_name = (request.args.get("split_name") or "").strip()
     return render_template(
         "bbcode.html",
         scene_id=scene_id,
         filename=filename,
         gallery=gallery,
+        gallery_filester=gallery_filester,
+        split_parts=split_parts,
+        split_name=split_name,
+        active_providers=ACTIVE_PROVIDERS,
+        filester_enabled=FILESTER_ENABLED,
         stashdb_scenes_base=STASHDB_SCENES_BASE,
         jpg6_to_album=JPG6_TO_ALBUM,
     )
@@ -2681,6 +2840,12 @@ def api_stashdb_autofill():
         payload["gallery_link"] = gallery_url
         payload["gallery_match"] = studio_meta.get("folder_match")
         payload["gallery_matched_level"] = studio_meta.get("matched_level")
+    fs_gallery = studio_meta.get("filester_gallery_link")
+    if fs_gallery and not (data.get("skip_gallery") or False):
+        payload["filester_gallery_link"] = fs_gallery
+    thread_url = studio_meta.get("thread_url")
+    if thread_url:
+        payload["thread_url"] = thread_url
 
     return jsonify(payload)
 
@@ -4907,6 +5072,63 @@ def api_studio_aliases_delete():
     return jsonify({"ok": True})
 
 
+@app.route("/api/studio_threads", methods=["GET"])
+def api_studio_threads_list():
+    """List optional per-studio forum thread URLs (not required for posting)."""
+    data = _studio_threads_load()
+    rows = []
+    for key, row in data.items():
+        if not isinstance(row, dict):
+            continue
+        stash = (row.get("stashdb_studio") or key or "").strip()
+        thread_url = (row.get("thread_url") or "").strip()
+        if not stash or not thread_url:
+            continue
+        rows.append({
+            "key": key,
+            "stashdb_studio": stash,
+            "thread_url": thread_url,
+            "updated_at": row.get("updated_at"),
+        })
+    rows.sort(key=lambda r: (r.get("stashdb_studio") or "").casefold())
+    return jsonify({"ok": True, "threads": rows})
+
+
+@app.route("/api/studio_threads", methods=["POST"])
+def api_studio_threads_save():
+    data = request.get_json(silent=True) or {}
+    stash = (data.get("stashdb_studio") or "").strip()
+    thread_url = (data.get("thread_url") or "").strip()
+    if not stash or not thread_url:
+        return jsonify({"error": "stashdb_studio and thread_url are required"}), 400
+    key = _studio_thread_key(stash)
+    store = _studio_threads_load()
+    store[key] = {
+        "stashdb_studio": stash,
+        "thread_url": thread_url,
+        "updated_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    _studio_threads_save(store)
+    return jsonify({"ok": True, "thread": store[key], "key": key})
+
+
+@app.route("/api/studio_threads", methods=["DELETE"])
+def api_studio_threads_delete():
+    data = request.get_json(silent=True) or {}
+    key = (data.get("key") or "").strip()
+    stash = (data.get("stashdb_studio") or "").strip()
+    if not key and stash:
+        key = _studio_thread_key(stash)
+    if not key:
+        return jsonify({"error": "key or stashdb_studio is required"}), 400
+    store = _studio_threads_load()
+    if key not in store:
+        return jsonify({"error": "thread not found"}), 404
+    store.pop(key, None)
+    _studio_threads_save(store)
+    return jsonify({"ok": True})
+
+
 @app.route("/api/performer_links_lookup", methods=["POST"])
 def api_performer_links_lookup():
     """Lookup previously saved performer links by exact performer name."""
@@ -5243,14 +5465,20 @@ def api_job_status(job_id):
 
 @app.route("/api/upload_config")
 def api_upload_config():
-    return jsonify({"provider": UPLOAD_PROVIDER, "label": PROVIDER_LABEL})
+    return jsonify({
+        "provider": UPLOAD_PROVIDER,
+        "label": PROVIDER_LABEL,
+        "gofile_enabled": GOFILE_ENABLED,
+        "filester_enabled": FILESTER_ENABLED,
+        "active_providers": ACTIVE_PROVIDERS,
+    })
 
 
 @app.route("/api/gofile_folders")
 def api_gofile_folders():
     try:
         root_id = _ensure_root()
-        folders = _load_folders()
+        folders = _load_gofile_folders()
         sorted_folders = sorted(
             folders.items(),
             key=lambda item: item[1].casefold()
@@ -5260,6 +5488,15 @@ def api_gofile_folders():
     except Exception as e:
         print(f"[API] Failed to get GoFile folders: {e}", flush=True)
         return jsonify({"folders": [], "error": str(e)})
+
+
+@app.route("/api/filester_folders")
+def api_filester_folders():
+    """Read-only Filester studio folder list."""
+    folders = _load_filester_folders()
+    sorted_folders = sorted(folders.items(), key=lambda item: item[1].casefold())
+    result = [{"id": fid, "name": name} for fid, name in sorted_folders]
+    return jsonify({"folders": result})
 
 
 @app.route("/api/gofile_create_folder", methods=["POST"])
@@ -5273,7 +5510,7 @@ def api_gofile_create_folder():
         if not parent_id:
             parent_id = _ensure_root()
         new_id = create_folder(parent_id, name)
-        folders = _load_folders()
+        folders = _load_gofile_folders()
         folders[new_id] = name
         _save_folders(folders)
         print(f"[GOFILE] Created folder '{name}' ({new_id}) under {parent_id}", flush=True)
@@ -5290,7 +5527,7 @@ def api_gofile_add_existing():
     folder_id = raw.rstrip("/").split("/")[-1] if "/" in raw else raw
     if not folder_id or not name:
         return jsonify({"error": "folder_id and name required"}), 400
-    folders = _load_folders()
+    folders = _load_gofile_folders()
     folders[folder_id] = name
     _save_folders(folders)
     return jsonify({"id": folder_id, "name": name})
@@ -5366,27 +5603,113 @@ def _make_ul_progress(job_id, folder_name):
     return cb
 
 
-def _finalize_upload(job_id, results):
-    download_pages = []
+def _finalize_upload(
+    job_id,
+    results,
+    *,
+    filester_skip_reason: str | None = None,
+    filester_folder_id: str | None = None,
+):
+    gofile_urls: list[str] = []
+    filester_part_urls: list[str] = []
+    split_info = None
+    failed: list[str] = []
+
     for r in results:
         if not r.ok:
-            raise RuntimeError(f"{PROVIDER_LABEL} rejected upload: {r.raw}")
-        if r.gallery_url:
-            download_pages.append(r.gallery_url)
-    if not download_pages:
-        raise RuntimeError(f"Upload completed but {PROVIDER_LABEL} returned no download page")
+            failed.append(f"{r.provider or 'upload'}: {r.raw}")
+            continue
+        if r.provider == "gofile" and r.gallery_url:
+            gofile_urls.append(r.gallery_url)
+        elif r.provider == "filester" and r.gallery_url:
+            filester_part_urls.append(r.gallery_url)
+        if r.was_split and not split_info:
+            split_info = {
+                "part_count": r.part_count,
+                "original_basename": r.original_basename,
+            }
+
+    if not gofile_urls and not filester_part_urls:
+        detail = "; ".join(failed) if failed else "no download page returned"
+        raise RuntimeError(f"Upload failed for all destinations: {detail}")
+
+    if failed:
+        for msg in failed:
+            _append_job_log(job_id, f"Partial failure: {msg}")
+
+    gofile_url = gofile_urls[0] if gofile_urls else ""
+    if filester_part_urls:
+        if split_info and filester_folder_id:
+            filester_url = folder_url(filester_folder_id, provider="filester")
+        else:
+            filester_url = filester_part_urls[0]
+    else:
+        filester_url = ""
+
     jobs[job_id]["status"] = "done"
-    first_download = download_pages[0]
-    jobs[job_id]["download_page"] = first_download if len(download_pages) == 1 else ", ".join(download_pages)
-    # If this job already prepared a BBCode helper URL, pass the short GoFile
-    # link through so helper can prefill gallery-link from actual upload output.
+    jobs[job_id]["upload_destinations"] = list({
+        r.provider for r in results if r.ok and r.provider
+    })
+    if gofile_url:
+        jobs[job_id]["download_page_gofile"] = gofile_url
+    if filester_url:
+        jobs[job_id]["download_page_filester"] = filester_url
+    if filester_skip_reason:
+        jobs[job_id]["filester_skipped_reason"] = filester_skip_reason
+
+    parts = [u for u in (gofile_url, filester_url) if u]
+    jobs[job_id]["download_page"] = " | ".join(parts)
+
+    source_fn = (jobs[job_id].get("source_filename") or "").strip()
+    if source_fn and (gofile_url or filester_url):
+        upload_meta = {
+            "recorded_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        if gofile_url:
+            upload_meta["gofile_url"] = gofile_url
+        if filester_url:
+            upload_meta["filester_url"] = filester_url
+        if filester_skip_reason:
+            upload_meta["filester_skipped_reason"] = filester_skip_reason
+        _scenes_set(source_fn, upload=upload_meta)
+
+    if split_info:
+        jobs[job_id]["split"] = split_info
+        if source_fn:
+            _scenes_set(
+                source_fn,
+                split={
+                    "part_count": split_info["part_count"],
+                    "original_basename": split_info["original_basename"],
+                    "recorded_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                },
+            )
+
     helper = jobs[job_id].get("stashdb_helper_url") or ""
     if isinstance(helper, str) and helper.startswith("/bbcode"):
-        sep = "&" if "?" in helper else "?"
-        jobs[job_id]["stashdb_helper_url"] = helper + sep + urllib.parse.urlencode({
-            "gallery": first_download,
-        })
-    jobs[job_id]["status_text"] = "Complete"
+        extra: dict[str, str] = {}
+        if gofile_url:
+            extra["gallery"] = gofile_url
+        if filester_url:
+            extra["gallery_filester"] = filester_url
+        if split_info and split_info.get("part_count", 0) > 1:
+            extra["split_parts"] = str(split_info["part_count"])
+            if split_info.get("original_basename"):
+                extra["split_name"] = split_info["original_basename"]
+        if extra:
+            sep = "&" if "?" in helper else "?"
+            jobs[job_id]["stashdb_helper_url"] = helper + sep + urllib.parse.urlencode(extra)
+
+    status_bits = ["Complete"]
+    if gofile_url and filester_url:
+        status_bits.append("GoFile + Filester")
+    elif gofile_url:
+        status_bits.append("GoFile")
+    elif filester_url:
+        status_bits.append("Filester")
+    if filester_skip_reason:
+        status_bits.append("Filester skipped")
+    jobs[job_id]["status_text"] = " — ".join(status_bits)
     jobs[job_id]["progress"] = {"type": "upload", "percent": 100}
 
 
@@ -5440,6 +5763,7 @@ def _start_link_job(url, folder_id=None):
 
             jobs[job_id]["status"] = "uploading"
             fname = os.path.basename(downloaded_path)
+            jobs[job_id]["source_filename"] = fname
             jobs[job_id]["progress"] = None
             is_video = _is_video_file(downloaded_path)
             if is_video:
@@ -5449,10 +5773,13 @@ def _start_link_job(url, folder_id=None):
                 _start_parallel_upload_sidecars(job_id, downloaded_path)
             else:
                 jobs[job_id]["status_text"] = f"Uploading {fname} → {folder_name}..."
+            filester_folder_id = _resolve_filester_folder_id(folder_id)
+            jobs[job_id]["filester_folder_id"] = filester_folder_id or ""
             try:
-                results = upload_source(
+                results, filester_skip = upload_source(
                     downloaded_path,
                     folder_id=folder_id,
+                    filester_folder_id=filester_folder_id,
                     on_progress=_make_ul_progress(job_id, folder_name),
                     should_cancel=lambda: _is_cancelled(job_id),
                     on_log=lambda ln: _append_job_log(job_id, ln),
@@ -5466,7 +5793,12 @@ def _start_link_job(url, folder_id=None):
             if _is_cancelled(job_id):
                 return
 
-            _finalize_upload(job_id, results)
+            _finalize_upload(
+                job_id,
+                results,
+                filester_skip_reason=filester_skip,
+                filester_folder_id=filester_folder_id,
+            )
             if is_video:
                 _join_phash_followup_thread(job_id, timeout=None)
 
@@ -5572,6 +5904,8 @@ def _start_path_job(path, folder_id=None):
 
             jobs[job_id]["status"] = "uploading"
             jobs[job_id]["progress"] = None
+            if os.path.isfile(path):
+                jobs[job_id]["source_filename"] = os.path.basename(path)
             is_vid_file = os.path.isfile(path) and _is_video_file(path)
             if is_vid_file:
                 jobs[job_id]["status_text"] = (
@@ -5581,10 +5915,13 @@ def _start_path_job(path, folder_id=None):
                 _start_parallel_upload_sidecars(job_id, path)
             else:
                 jobs[job_id]["status_text"] = f"Starting upload → {folder_name}..."
+            filester_folder_id = _resolve_filester_folder_id(folder_id)
+            jobs[job_id]["filester_folder_id"] = filester_folder_id or ""
             try:
-                results = upload_source(
+                results, filester_skip = upload_source(
                     path,
                     folder_id=folder_id,
+                    filester_folder_id=filester_folder_id,
                     on_progress=_make_ul_progress(job_id, folder_name),
                     should_cancel=lambda: _is_cancelled(job_id),
                     on_log=lambda ln: _append_job_log(job_id, ln),
@@ -5595,7 +5932,12 @@ def _start_path_job(path, folder_id=None):
                     t_out = 15.0 if _is_cancelled(job_id) else None
                     _join_parallel_upload_sidecars(job_id, timeout=t_out)
             if not _is_cancelled(job_id):
-                _finalize_upload(job_id, results)
+                _finalize_upload(
+                    job_id,
+                    results,
+                    filester_skip_reason=filester_skip,
+                    filester_folder_id=filester_folder_id,
+                )
         except Exception as e:
             if not _is_cancelled(job_id):
                 q_wait = _job_queue.qsize()
@@ -5646,9 +5988,13 @@ _restore_pending_queue = register_queue_routes(
 
 if __name__ == "__main__":
     os.makedirs(DOWNLOADS_DIR, exist_ok=True)
-    folders = _load_folders()
+    folders = _load_gofile_folders()
     print(f"[gofup] Loaded {len(folders)} saved folder(s) from {FOLDERS_FILE}", flush=True)
-    print(f"[gofup] Upload provider: {PROVIDER_LABEL} ({UPLOAD_PROVIDER})", flush=True)
+    print(
+        f"[gofup] Upload: {PROVIDER_LABEL} "
+        f"(gofile={GOFILE_ENABLED}, filester={FILESTER_ENABLED})",
+        flush=True,
+    )
     if _env_yes("GOFUP_RESTORE_QUEUE", default="1"):
         try:
             restored = _restore_pending_queue()

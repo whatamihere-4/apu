@@ -19,8 +19,14 @@ class UploadResult:
 
     gallery_url is the public download/view page for the uploaded file.
     raw keeps the provider's original JSON response for logging/debugging.
+    Split metadata is set when Filester byte-split uploads produce multiple parts.
     """
 
     ok: bool
+    provider: str = ""
     gallery_url: str = ""
     raw: dict = field(default_factory=dict)
+    part_index: int = 0
+    part_count: int = 1
+    original_basename: str = ""
+    was_split: bool = False
