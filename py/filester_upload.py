@@ -55,6 +55,27 @@ def folder_url(folder_id):
     return f"{FILESTER_SITE_URL}/folder/{folder_id}" if folder_id else FILESTER_SITE_URL
 
 
+def gallery_url_from_response(raw: dict) -> str:
+    """Build a public download URL from a Filester upload JSON response."""
+    if not isinstance(raw, dict):
+        return ""
+    url = str(raw.get("url") or "").strip()
+    if url:
+        return url
+    slug = str(raw.get("slug") or "").strip()
+    if slug:
+        return f"{FILESTER_SITE_URL}/d/{slug}"
+    data = raw.get("data")
+    if isinstance(data, dict):
+        url = str(data.get("url") or "").strip()
+        if url:
+            return url
+        slug = str(data.get("slug") or "").strip()
+        if slug:
+            return f"{FILESTER_SITE_URL}/d/{slug}"
+    return ""
+
+
 def upload_file(filepath, folder_id=None, on_progress=None, should_cancel=None):
     """Upload a single file to Filester.
 
@@ -138,7 +159,7 @@ def upload_file(filepath, folder_id=None, on_progress=None, should_cancel=None):
         on_progress(100.0, filesize, filesize, 0, 0)
 
     if result.get("success"):
-        dl = result.get("url", "N/A")
+        dl = gallery_url_from_response(result) or "N/A"
         print(f"[FILESTER] {filename} DONE -> {dl}", flush=True)
     else:
         print(f"[FILESTER] {filename} FAILED: {result}", flush=True)

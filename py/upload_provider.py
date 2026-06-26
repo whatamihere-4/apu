@@ -146,7 +146,8 @@ def _normalize_gofile(raw: dict) -> UploadResult:
 
 
 def _normalize_filester(raw: dict, *, part: dict | None = None) -> UploadResult:
-    ok = bool(raw.get("success"))
+    gallery_url = filester_upload.gallery_url_from_response(raw)
+    ok = bool(raw.get("success")) and bool(gallery_url)
     part_count = 1
     part_index = 0
     original_basename = ""
@@ -160,7 +161,7 @@ def _normalize_filester(raw: dict, *, part: dict | None = None) -> UploadResult:
     return UploadResult(
         ok=ok,
         provider="filester",
-        gallery_url=raw.get("url", "") if ok else "",
+        gallery_url=gallery_url,
         raw=raw,
         part_index=part_index,
         part_count=part_count,
@@ -432,7 +433,7 @@ def upload_source(
             )
 
         if filester_ran:
-            fs_folder = filester_folder_id if filester_folder_id is not None else folder_id
+            fs_folder = (filester_folder_id or "").strip() or None
             src_results.extend(
                 _upload_filester_parts(
                     src,

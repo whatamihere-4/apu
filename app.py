@@ -543,17 +543,21 @@ def _filester_folder_url_search(
     return folder_url(folder_id, provider="filester"), match_mode, matched_label
 
 
-def _resolve_filester_folder_id(gofile_folder_id: str | None) -> str | None:
-    """Map a GoFile folder picker ID to a Filester folder ID by display name."""
-    if not gofile_folder_id:
+def _resolve_filester_folder_id(folder_id: str | None) -> str | None:
+    """Map a UI folder selection to a Filester folder identifier."""
+    folder_id = (folder_id or "").strip()
+    if not folder_id:
         return None
-    label = (_load_gofile_folders().get(gofile_folder_id) or "").strip()
+    filester_folders = _load_filester_folders()
+    if folder_id in filester_folders:
+        return folder_id
+    label = (_load_gofile_folders().get(folder_id) or "").strip()
     if not label:
         return None
-    folder_id, _mode, _matched = _folder_id_search(
-        _load_filester_folders(), label, strip_vr=True
+    resolved, _mode, _matched = _folder_id_search(
+        filester_folders, label, strip_vr=True
     )
-    return folder_id
+    return resolved
 
 
 def _gofile_folder_url_for_display_name(display_name: str) -> str | None:
@@ -1195,8 +1199,13 @@ def _maybe_delete_remote_download(path: str | None) -> None:
 def _folder_display_name(folder_id):
     if not folder_id:
         return "Root"
-    folders = _load_gofile_folders()
-    return folders.get(folder_id, folder_id[:12])
+    gofile_folders = _load_gofile_folders()
+    if folder_id in gofile_folders:
+        return gofile_folders[folder_id]
+    filester_folders = _load_filester_folders()
+    if folder_id in filester_folders:
+        return filester_folders[folder_id]
+    return folder_id[:12]
 
 
 def _is_video_file(path):
@@ -5773,7 +5782,14 @@ def _finalize_upload(
             }
 
     if not gofile_urls and not filester_part_urls:
-        detail = "; ".join(failed) if failed else "no download page returned"
+        missing_url = [
+            f"{r.provider}: success but no download URL in response"
+            for r in results
+            if r.ok is False and r.raw.get("success")
+        ]
+        detail = "; ".join(failed) if failed else (
+            "; ".join(missing_url) if missing_url else "no download page returned"
+        )
         raise RuntimeError(f"Upload failed for all destinations: {detail}")
 
     if failed:

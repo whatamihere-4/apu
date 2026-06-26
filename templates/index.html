@@ -237,7 +237,7 @@
     </select>
     <p id="folder-load-status" style="margin-top:0.35rem; display:none; color:var(--muted); font-size:0.8rem;"></p>
     <p id="folder-parity-warning" style="margin-top:0.35rem; display:none; color:var(--warn); font-size:0.8rem;"></p>
-    <div class="folder-row" style="margin-top:0.6rem;">
+    <div class="folder-row" id="create-folder-row" style="margin-top:0.6rem;">
       <input type="text" id="new-folder-name" placeholder="New folder name...">
       <button class="btn-sm" id="create-folder-btn">Create</button>
     </div>
@@ -748,9 +748,54 @@
       const filesterOn = !!(providerConfig && providerConfig.filester_enabled);
       const gofileRow = document.getElementById('existing-gofile-row');
       const filesterRow = document.getElementById('existing-filester-row');
+      const createRow = document.getElementById('create-folder-row');
       if (gofileRow) gofileRow.style.display = gofileOn ? 'block' : 'none';
       if (filesterRow) filesterRow.style.display = filesterOn ? 'block' : 'none';
+      if (createRow) createRow.style.display = gofileOn ? 'flex' : 'none';
     }
+
+    async function loadUploadFolders(selectId) {
+      const sel = document.getElementById('folder-select');
+      const statusEl = document.getElementById('folder-load-status');
+      const gofileOn = !!(providerConfig && providerConfig.gofile_enabled);
+      const filesterOn = !!(providerConfig && providerConfig.filester_enabled);
+      const endpoint = (!gofileOn && filesterOn)
+        ? '/api/filester_folders'
+        : '/api/gofile_folders';
+      try {
+        const data = await apiGet(endpoint);
+        const prev = selectId || sel.value;
+        sel.innerHTML = '<option value="">Root (default)</option>';
+        for (const f of (data.folders || [])) {
+          const opt = document.createElement('option');
+          opt.value = f.id;
+          opt.textContent = f.name;
+          sel.appendChild(opt);
+        }
+        if (prev) sel.value = prev;
+        const msg = (data.warning || data.error || '').trim();
+        if (msg) {
+          statusEl.textContent = msg;
+          statusEl.style.display = 'block';
+        } else if (!(data.folders || []).length) {
+          const mapName = (!gofileOn && filesterOn) ? 'filester-folders.json' : 'gofile-folders.json';
+          statusEl.textContent = `No saved folders yet — add one below or edit cache/${mapName}.`;
+          statusEl.style.display = 'block';
+        } else {
+          statusEl.textContent = '';
+          statusEl.style.display = 'none';
+        }
+      } catch (e) {
+        console.error('[gofup] Failed to load upload folders:', e);
+        if (statusEl) {
+          statusEl.textContent = 'Failed to load folders: ' + e.message;
+          statusEl.style.display = 'block';
+        }
+      }
+      await refreshFolderParity();
+    }
+
+    const loadGofileFolders = loadUploadFolders;
 
     async function refreshFolderParity() {
       const el = document.getElementById('folder-parity-warning');
@@ -782,41 +827,6 @@
       } catch (e) {
         console.error('[gofup] Failed to check folder parity:', e);
       }
-    }
-
-    async function loadGofileFolders(selectId) {
-      const sel = document.getElementById('folder-select');
-      const statusEl = document.getElementById('folder-load-status');
-      try {
-        const data = await apiGet('/api/gofile_folders');
-        const prev = selectId || sel.value;
-        sel.innerHTML = '<option value="">Root (default)</option>';
-        for (const f of (data.folders || [])) {
-          const opt = document.createElement('option');
-          opt.value = f.id;
-          opt.textContent = f.name;
-          sel.appendChild(opt);
-        }
-        if (prev) sel.value = prev;
-        const msg = (data.warning || data.error || '').trim();
-        if (msg) {
-          statusEl.textContent = msg;
-          statusEl.style.display = 'block';
-        } else if (!(data.folders || []).length) {
-          statusEl.textContent = 'No saved folders yet — create one or add by ID below.';
-          statusEl.style.display = 'block';
-        } else {
-          statusEl.textContent = '';
-          statusEl.style.display = 'none';
-        }
-      } catch (e) {
-        console.error('[gofup] Failed to load GoFile folders:', e);
-        if (statusEl) {
-          statusEl.textContent = 'Failed to load folders: ' + e.message;
-          statusEl.style.display = 'block';
-        }
-      }
-      await refreshFolderParity();
     }
 
     document.getElementById('create-folder-btn').addEventListener('click', async () => {
@@ -966,7 +976,7 @@
     // ── Init ──────────────────────────────
     (async () => {
       await loadProviderConfig();
-      await loadGofileFolders();
+      await loadUploadFolders();
     })();
     browse('/downloads');
     refreshJobs().then((nextDelay) => scheduleJobsRefresh(nextDelay));
