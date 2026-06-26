@@ -98,9 +98,21 @@ def _downloads_key_for_sidecars(full_path: str) -> str:
 THUMBS_DIR = os.path.realpath(
     (os.environ.get("GOFUP_THUMBS_DIR") or "/thumbs").rstrip("/") or "/thumbs"
 )
+
+
+def _resolve_cache_dir(path: str) -> str:
+    """Resolve cache dir; relative paths are anchored to APP_DIR, not process cwd."""
+    path = (path or "").strip() or os.path.join(APP_DIR, "cache")
+    if not os.path.isabs(path):
+        path = os.path.join(APP_DIR, path)
+    return path
+
+
 HASHES_DIR = os.path.realpath(
-    (os.environ.get("GOFUP_CACHE_DIR") or os.path.join(APP_DIR, "cache")).rstrip("/")
-    or os.path.join(APP_DIR, "cache")
+    _resolve_cache_dir(
+        (os.environ.get("GOFUP_CACHE_DIR") or os.path.join(APP_DIR, "cache")).rstrip("/")
+        or os.path.join(APP_DIR, "cache")
+    )
 )
 FOLDERS_FILE = os.path.join(HASHES_DIR, "folders.json")
 FILESTER_FOLDERS_FILE = (
@@ -834,6 +846,15 @@ def _ensure_root():
         _gofile_root_id = get_root_folder_id()
         print(f"[GOFILE] Root folder: {_gofile_root_id}", flush=True)
     return _gofile_root_id
+
+
+def _gofile_root_id_optional() -> str | None:
+    """Best-effort root folder id; None when GoFile API is unavailable."""
+    try:
+        return _ensure_root()
+    except Exception as e:
+        print(f"[GOFILE] Root folder lookup failed: {e}", flush=True)
+        return None
 
 
 # ── Scene cache (file-backed; survives container restarts and file deletions) ──
@@ -5487,18 +5508,25 @@ def api_upload_config():
 
 @app.route("/api/gofile_folders")
 def api_gofile_folders():
-    try:
-        root_id = _ensure_root()
-        folders = _load_gofile_folders()
-        sorted_folders = sorted(
-            folders.items(),
-            key=lambda item: item[1].casefold()
+    folders = _load_gofile_folders()
+    sorted_folders = sorted(
+        folders.items(),
+        key=lambda item: str(item[1]).casefold(),
+    )
+    result = [{"id": fid, "name": name} for fid, name in sorted_folders]
+    root_id = _gofile_root_id_optional()
+    payload: dict = {"folders": result, "root_id": root_id}
+    if not result:
+        payload["warning"] = (
+            f"No folders in {FOLDERS_FILE}. "
+            "Add folders via the UI or run scripts/scrape_folders.py."
         )
-        result = [{"id": fid, "name": name} for fid, name in sorted_folders]
-        return jsonify({"folders": result, "root_id": root_id})
-    except Exception as e:
-        print(f"[API] Failed to get GoFile folders: {e}", flush=True)
-        return jsonify({"folders": [], "error": str(e)})
+    elif root_id is None and GOFILE_ENABLED:
+        payload["warning"] = (
+            "Loaded saved folders, but GoFile root lookup failed "
+            "(check GOFILE_API_KEY). Create-folder may not work until fixed."
+        )
+    return jsonify(payload)
 
 
 @app.route("/api/filester_folders")
