@@ -334,9 +334,83 @@ def _save_folders(folders):
     print(f"[FOLDERS] Saved {len(folders)} GoFile folder(s) to {GOFILE_FOLDERS_FILE}", flush=True)
 
 
+def _save_filester_folders(folders):
+    """Write Filester folder map to cache/filester-folders.json."""
+    os.makedirs(HASHES_DIR, exist_ok=True)
+    with open(FILESTER_FOLDERS_FILE, "w", encoding="utf-8") as f:
+        json.dump(folders, f, indent=2, sort_keys=True)
+    print(
+        f"[FOLDERS] Saved {len(folders)} Filester folder(s) to {FILESTER_FOLDERS_FILE}",
+        flush=True,
+    )
+
+
+def _parse_gofile_folder_id(raw: str) -> str:
+    raw = (raw or "").strip()
+    if not raw:
+        return ""
+    if "://" in raw:
+        path = urllib.parse.urlparse(raw).path.strip("/")
+        parts = [p for p in path.split("/") if p]
+        if len(parts) >= 2 and parts[0].lower() == "d":
+            return parts[1]
+        if parts:
+            return parts[-1]
+    return raw.rstrip("/").split("/")[-1]
+
+
+def _parse_filester_folder_id(raw: str) -> str:
+    raw = (raw or "").strip()
+    if not raw:
+        return ""
+    if "://" in raw:
+        path = urllib.parse.urlparse(raw).path.strip("/")
+        parts = [p for p in path.split("/") if p]
+        if len(parts) >= 2 and parts[0].lower() == "folder":
+            return parts[1]
+        if parts:
+            return parts[-1]
+    return raw.rstrip("/").split("/")[-1]
+
+
 def _folder_match_key(label: str) -> str:
     """Case-insensitive key with all whitespace removed (for fuzzy folder match)."""
     return re.sub(r"\s+", "", str(label or "").strip().casefold())
+
+
+def _folder_labels_by_match_key(folders: dict) -> dict[str, str]:
+    """Map normalized label key → display label (last wins on duplicates)."""
+    out: dict[str, str] = {}
+    for _folder_id, label in folders.items():
+        if not isinstance(label, str):
+            continue
+        key = _folder_match_key(label)
+        if key:
+            out[key] = label.strip()
+    return out
+
+
+def _folder_parity_report() -> dict:
+    """Compare GoFile and Filester folder maps by normalized display name."""
+    gofile = _folder_labels_by_match_key(_load_gofile_folders())
+    filester = _folder_labels_by_match_key(_load_filester_folders())
+    gofile_keys = set(gofile)
+    filester_keys = set(filester)
+    only_gofile = sorted(
+        (gofile[k] for k in gofile_keys - filester_keys),
+        key=str.casefold,
+    )
+    only_filester = sorted(
+        (filester[k] for k in filester_keys - gofile_keys),
+        key=str.casefold,
+    )
+    return {
+        "only_gofile": only_gofile,
+        "only_filester": only_filester,
+        "matched_count": len(gofile_keys & filester_keys),
+        "gofile_count": len(gofile),
+        "filester_count": len(filester),
+    }
 
 
 _NETWORK_SUFFIX_RE = re.compile(r"\s*\(Network\)\s*$", re.IGNORECASE)
@@ -5543,6 +5617,16 @@ def api_filester_folders():
     return jsonify({"folders": result})
 
 
+@app.route("/api/folder_parity")
+def api_folder_parity():
+    """Report GoFile/Filester folder map mismatches by display name."""
+    if not (GOFILE_ENABLED and FILESTER_ENABLED):
+        return jsonify({"ok": True, "skipped": True, "reason": "dual upload not enabled"})
+    report = _folder_parity_report()
+    report["ok"] = not report["only_gofile"] and not report["only_filester"]
+    return jsonify(report)
+
+
 @app.route("/api/gofile_create_folder", methods=["POST"])
 def api_gofile_create_folder():
     data = request.get_json()
@@ -5568,12 +5652,26 @@ def api_gofile_add_existing():
     data = request.get_json()
     raw = data.get("folder_id", "").strip()
     name = data.get("name", "").strip()
-    folder_id = raw.rstrip("/").split("/")[-1] if "/" in raw else raw
+    folder_id = _parse_gofile_folder_id(raw)
     if not folder_id or not name:
         return jsonify({"error": "folder_id and name required"}), 400
     folders = _load_gofile_folders()
     folders[folder_id] = name
     _save_folders(folders)
+    return jsonify({"id": folder_id, "name": name})
+
+
+@app.route("/api/filester_add_folder", methods=["POST"])
+def api_filester_add_existing():
+    data = request.get_json()
+    raw = data.get("folder_id", "").strip()
+    name = data.get("name", "").strip()
+    folder_id = _parse_filester_folder_id(raw)
+    if not folder_id or not name:
+        return jsonify({"error": "folder_id and name required"}), 400
+    folders = _load_filester_folders()
+    folders[folder_id] = name
+    _save_filester_folders(folders)
     return jsonify({"id": folder_id, "name": name})
 
 

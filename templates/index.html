@@ -236,16 +236,27 @@
       <option value="">Root (default)</option>
     </select>
     <p id="folder-load-status" style="margin-top:0.35rem; display:none; color:var(--muted); font-size:0.8rem;"></p>
+    <p id="folder-parity-warning" style="margin-top:0.35rem; display:none; color:var(--warn); font-size:0.8rem;"></p>
     <div class="folder-row" style="margin-top:0.6rem;">
       <input type="text" id="new-folder-name" placeholder="New folder name...">
       <button class="btn-sm" id="create-folder-btn">Create</button>
     </div>
     <details style="margin-top:0.75rem;">
-      <summary style="font-size:0.8rem; color:var(--muted); cursor:pointer;">Add existing folder by ID</summary>
-      <div class="folder-row" style="margin-top:0.4rem;">
-        <input type="text" id="existing-folder-id" placeholder="Folder ID from share URL...">
-        <input type="text" id="existing-folder-name" placeholder="Label" style="max-width:120px;">
-        <button class="btn-sm" id="add-folder-btn">Add</button>
+      <summary style="font-size:0.8rem; color:var(--muted); cursor:pointer;">Add existing folder</summary>
+      <div style="margin-top:0.5rem;">
+        <label for="existing-folder-name" style="font-size:0.8rem; color:var(--muted);">Label</label>
+        <input type="text" id="existing-folder-name" placeholder="Studio name (must match both maps)" style="margin-top:0.25rem;">
+      </div>
+      <div id="existing-gofile-row" style="margin-top:0.5rem;">
+        <label for="existing-gofile-folder" style="font-size:0.8rem; color:var(--muted);">GoFile folder ID or link</label>
+        <input type="text" id="existing-gofile-folder" placeholder="https://gofile.io/d/… or folder UUID" style="margin-top:0.25rem;">
+      </div>
+      <div id="existing-filester-row" style="margin-top:0.5rem; display:none;">
+        <label for="existing-filester-folder" style="font-size:0.8rem; color:var(--muted);">Filester folder link</label>
+        <input type="text" id="existing-filester-folder" placeholder="https://filester.me/folder/…" style="margin-top:0.25rem;">
+      </div>
+      <div class="folder-row" style="margin-top:0.5rem;">
+        <button class="btn-sm" id="add-folder-btn">Add to folder map</button>
       </div>
     </details>
   </div>
@@ -285,6 +296,7 @@
 
   <script>
     let currentDir = '/downloads';
+    let providerConfig = null;
     let selectedPath = null;
     let jobsPollTimer = null;
     let jobsPollInFlight = false;
@@ -731,6 +743,47 @@
     }
 
     // ── GoFile folders ────────────────────
+    function updateFolderFormVisibility() {
+      const gofileOn = !!(providerConfig && providerConfig.gofile_enabled);
+      const filesterOn = !!(providerConfig && providerConfig.filester_enabled);
+      const gofileRow = document.getElementById('existing-gofile-row');
+      const filesterRow = document.getElementById('existing-filester-row');
+      if (gofileRow) gofileRow.style.display = gofileOn ? 'block' : 'none';
+      if (filesterRow) filesterRow.style.display = filesterOn ? 'block' : 'none';
+    }
+
+    async function refreshFolderParity() {
+      const el = document.getElementById('folder-parity-warning');
+      if (!el) return;
+      const dual = providerConfig && providerConfig.gofile_enabled && providerConfig.filester_enabled;
+      if (!dual) {
+        el.style.display = 'none';
+        el.textContent = '';
+        return;
+      }
+      try {
+        const data = await apiGet('/api/folder_parity');
+        const onlyGf = data.only_gofile || [];
+        const onlyFs = data.only_filester || [];
+        if (!onlyGf.length && !onlyFs.length) {
+          el.style.display = 'none';
+          el.textContent = '';
+          return;
+        }
+        const parts = [];
+        if (onlyGf.length) {
+          parts.push(`only in GoFile (${onlyGf.length}): ${onlyGf.join(', ')}`);
+        }
+        if (onlyFs.length) {
+          parts.push(`only in Filester (${onlyFs.length}): ${onlyFs.join(', ')}`);
+        }
+        el.textContent = `Folder map mismatch — ${parts.join(' · ')}`;
+        el.style.display = 'block';
+      } catch (e) {
+        console.error('[gofup] Failed to check folder parity:', e);
+      }
+    }
+
     async function loadGofileFolders(selectId) {
       const sel = document.getElementById('folder-select');
       const statusEl = document.getElementById('folder-load-status');
@@ -763,6 +816,7 @@
           statusEl.style.display = 'block';
         }
       }
+      await refreshFolderParity();
     }
 
     document.getElementById('create-folder-btn').addEventListener('click', async () => {
@@ -780,16 +834,33 @@
     });
 
     document.getElementById('add-folder-btn').addEventListener('click', async () => {
-      const folderId = document.getElementById('existing-folder-id').value.trim();
-      const name = document.getElementById('existing-folder-name').value.trim() || folderId.substring(0, 8);
-      if (!folderId) { alert('Enter a folder ID.'); return; }
+      const name = document.getElementById('existing-folder-name').value.trim();
+      const gofileRaw = document.getElementById('existing-gofile-folder').value.trim();
+      const filesterRaw = document.getElementById('existing-filester-folder').value.trim();
+      const gofileOn = !!(providerConfig && providerConfig.gofile_enabled);
+      const filesterOn = !!(providerConfig && providerConfig.filester_enabled);
+      if (!name) { alert('Enter a folder label.'); return; }
+      const addGofile = gofileOn && !!gofileRaw;
+      const addFilester = filesterOn && !!filesterRaw;
+      if (!addGofile && !addFilester) {
+        alert('Enter a folder link for at least one enabled provider.');
+        return;
+      }
       const btn = document.getElementById('add-folder-btn');
       btn.disabled = true;
       try {
-        const data = await api('/api/gofile_add_folder', { folder_id: folderId, name });
-        document.getElementById('existing-folder-id').value = '';
+        let selectId = '';
+        if (addGofile) {
+          const data = await api('/api/gofile_add_folder', { folder_id: gofileRaw, name });
+          selectId = data.id;
+        }
+        if (addFilester) {
+          await api('/api/filester_add_folder', { folder_id: filesterRaw, name });
+        }
         document.getElementById('existing-folder-name').value = '';
-        await loadGofileFolders(data.id);
+        document.getElementById('existing-gofile-folder').value = '';
+        document.getElementById('existing-filester-folder').value = '';
+        await loadGofileFolders(selectId);
       } catch (e) { alert('Failed to add folder: ' + e.message); }
       btn.disabled = false;
     });
@@ -877,6 +948,7 @@
     async function loadProviderConfig() {
       try {
         const cfg = await apiGet('/api/upload_config');
+        providerConfig = cfg;
         const label = cfg.label || 'Upload';
         const active = (cfg.active_providers || []).join(' + ') || label;
         document.title = `gofup — ${label}`;
@@ -884,6 +956,7 @@
           `Upload to ${escHtml(active)} &mdash; from link or file`;
         document.getElementById('destination-title').textContent = `${label} Destination`;
         document.getElementById('upload-btn').textContent = `Upload to ${label}`;
+        updateFolderFormVisibility();
       } catch (e) { console.error('[gofup] Failed to load provider config:', e); }
     }
 
@@ -891,10 +964,12 @@
     document.getElementById('copy-queue-btn').addEventListener('click', () => exportQueue(false));
 
     // ── Init ──────────────────────────────
-    loadProviderConfig();
+    (async () => {
+      await loadProviderConfig();
+      await loadGofileFolders();
+    })();
     browse('/downloads');
     refreshJobs().then((nextDelay) => scheduleJobsRefresh(nextDelay));
-    loadGofileFolders();
   </script>
 </body>
 </html>
