@@ -85,7 +85,7 @@ def create_folder(parent_id, name):
 
 
 def folder_url(folder_id):
-    return f"{FILESTER_SITE_URL}/folder/{folder_id}" if folder_id else FILESTER_SITE_URL
+    return f"{FILESTER_SITE_URL}/f/{folder_id}" if folder_id else FILESTER_SITE_URL
 
 
 def gallery_url_from_response(raw: dict) -> str:

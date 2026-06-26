@@ -450,7 +450,7 @@ def _parse_filester_folder_id(raw: str) -> str:
     if "://" in raw:
         path = urllib.parse.urlparse(raw).path.strip("/")
         parts = [p for p in path.split("/") if p]
-        if len(parts) >= 2 and parts[0].lower() == "folder":
+        if len(parts) >= 2 and parts[0].lower() in ("f", "folder"):
             return parts[1]
         if parts:
             return parts[-1]
