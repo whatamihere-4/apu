@@ -37,6 +37,8 @@ from upload_provider import (
     FILESTER_ENABLED,
     ACTIVE_PROVIDERS,
     FILESTER_SPLIT_MODE,
+    FILESTER_SPLIT_FALLBACK,
+    resolve_split_mode,
 )
 from downloader import download_file, TransferCancelled
 from oshash_remote import fetch_oshash_from_url
@@ -5479,6 +5481,7 @@ def api_upload_config():
         "filester_enabled": FILESTER_ENABLED,
         "active_providers": ACTIVE_PROVIDERS,
         "filester_split_mode": FILESTER_SPLIT_MODE,
+        "filester_split_fallback": FILESTER_SPLIT_FALLBACK,
     })
 
 

@@ -766,10 +766,10 @@
       return { stem: base, ext: "", original: base };
     }
 
-    function windowsCopyCommand(stem, ext, partCount, original) {
+    function windowsCopyCommand(baseName, partCount, original) {
       const chunks = [];
       for (let i = 1; i <= partCount; i++) {
-        chunks.push(`${stem}.part${String(i).padStart(3, "0")}${ext}`);
+        chunks.push(`${baseName}.part${String(i).padStart(3, "0")}`);
       }
       return `copy /b ${chunks.join("+")} ${original}`;
     }
@@ -788,7 +788,7 @@
       if (!original) return "";
       const mode = (splitState.mode || "bytes").toLowerCase();
 
-      if (mode === "ffmpeg") {
+      if (mode === "ffmpeg" || mode === "ffmpeg_slice") {
         const listCmd = `printf "file '%s'\\n" ${stem}.PART*${ext} > parts.txt`;
         const joinCmd = `ffmpeg -f concat -safe 0 -i parts.txt -c copy ${original}`;
         return `
@@ -801,8 +801,8 @@ This file was split into ${splitState.parts} independently playable parts (ffmpe
 ${joinCmd}[/CODE]`;
       }
 
-      const linuxCmd = `cat ${stem}.part*${ext} > ${original}`;
-      const winCmd = windowsCopyCommand(stem, ext, splitState.parts, original);
+      const linuxCmd = `cat ${original}.part* > ${original}`;
+      const winCmd = windowsCopyCommand(original, splitState.parts, original);
       return `
 
 [HEADING=2]Reassembly (split upload)[/HEADING]

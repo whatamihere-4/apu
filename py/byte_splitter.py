@@ -1,8 +1,9 @@
 """Split large files into byte-range parts for Filester's ~10 GB upload limit.
 
 Only one part exists on disk alongside the source at any moment (source + one part
-peak). Parts are named ``<stem>.part001<ext>``, ``<stem>.part002<ext>``, … and
-reassemble losslessly with ``cat`` (Linux) or ``copy /b`` (Windows).
+peak). Non-playable parts use ``movie.mp4.part001``, ``movie.mk4.part002``, … so
+the real extension is not at the end. Reassemble with ``cat`` (Linux) or ``copy /b``
+(Windows).
 """
 from __future__ import annotations
 
@@ -27,6 +28,7 @@ def required_disk_bytes(file_size: int, part_size_bytes: int, *, split_mode: str
     if split_mode == "ffmpeg":
         # ffmpeg segment muxer holds the source while writing every part (~2× file).
         return file_size * 2
+    # bytes and ffmpeg_slice: source + one part at a time
     return file_size + part_size_bytes
 
 
@@ -95,11 +97,13 @@ def iter_upload_parts(
     stem = base_name or source.stem
     suffix = source.suffix
     num_parts = math.ceil(total_size / part_size_bytes)
+    # e.g. movie.mp4.part001 — extension stays on the basename, not the end of the part name.
+    part_prefix = source.name if not base_name else f"{stem}{suffix}"
 
     for idx in range(num_parts):
         offset = idx * part_size_bytes
         part_size = min(part_size_bytes, total_size - offset)
-        part_name = f"{stem}.part{idx + 1:03d}{suffix}"
+        part_name = f"{part_prefix}.part{idx + 1:03d}"
         part_path = output_dir / part_name
         _extract_part(source, part_path, offset, part_size, skip_check=skip_check)
         yield {

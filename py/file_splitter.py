@@ -11,6 +11,7 @@ Used in-process by gofup and by the splitter-http sidecar.
 """
 from __future__ import annotations
 
+import math
 import os
 import subprocess
 
@@ -190,6 +191,179 @@ def iter_upload_parts(
             "is_source": False,
             "original_basename": original,
             "split_mode": "ffmpeg",
+        }
+
+    if delete_source:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def _extract_single_segment(
+    path: str,
+    output_path: str,
+    start_sec: float,
+    duration_sec: float,
+    *,
+    timeout: int,
+    on_log=None,
+) -> None:
+    """Extract one stream-copy segment (playable output with normal extension)."""
+    cmd = [
+        FFMPEG_BIN, "-hide_banner", "-y",
+        "-ss", str(max(0.0, start_sec)),
+        "-i", path,
+        "-t", str(max(0.001, duration_sec)),
+        "-map", "0",
+        "-c", "copy",
+        "-reset_timestamps", "1",
+        output_path,
+    ]
+    if on_log:
+        on_log(
+            f"ffmpeg slice {os.path.basename(output_path)} "
+            f"@ {start_sec:.1f}s for {duration_sec:.1f}s"
+        )
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    if proc.returncode != 0:
+        tail = (proc.stderr or "")[-600:]
+        raise SplitError(f"ffmpeg slice failed (exit {proc.returncode}): {tail}")
+
+
+def iter_upload_parts_sliced(
+    path: str,
+    max_bytes: int,
+    output_dir: str,
+    *,
+    on_log=None,
+    should_cancel=None,
+    delete_source: bool = True,
+    ffmpeg_timeout: int = 7200,
+):
+    """Yield one ffmpeg stream-copy part at a time (~source + one part on disk).
+
+    Parts use playable names (``movie.PART1.mp4``). Segment duration is tuned
+    using the same byte budget as one-pass ffmpeg; the first part is probed before
+    any uploads begin.
+    """
+    size = os.path.getsize(path)
+    if size <= max_bytes:
+        yield {
+            "path": path,
+            "filename": os.path.basename(path),
+            "size_bytes": size,
+            "part_index": 0,
+            "part_count": 1,
+            "is_source": True,
+            "original_basename": os.path.basename(path),
+            "split_mode": "ffmpeg_slice",
+        }
+        return
+
+    os.makedirs(output_dir, exist_ok=True)
+    base = os.path.basename(path)
+    stem, ext = os.path.splitext(base)
+    duration = probe_duration(path)
+    bytes_per_sec = size / duration
+
+    segment_time = None
+    num_parts = None
+    last_err = None
+    for factor in _TARGET_FACTORS:
+        if should_cancel and should_cancel():
+            from downloader import TransferCancelled
+            raise TransferCancelled("Upload cancelled")
+
+        target_bytes = int(max_bytes * factor)
+        trial_segment_time = max(1, int(target_bytes / bytes_per_sec))
+        trial_num_parts = max(1, math.ceil(duration / trial_segment_time))
+        probe_name = f"{stem}.PART1{ext}"
+        probe_path = os.path.join(output_dir, probe_name)
+        try:
+            if os.path.isfile(probe_path):
+                os.remove(probe_path)
+        except OSError:
+            pass
+
+        _extract_single_segment(
+            path,
+            probe_path,
+            0,
+            trial_segment_time,
+            timeout=ffmpeg_timeout,
+            on_log=on_log,
+        )
+        probe_size = os.path.getsize(probe_path)
+        try:
+            os.remove(probe_path)
+        except OSError:
+            pass
+
+        if probe_size > max_bytes:
+            last_err = (
+                f"first slice exceeded limit at factor {factor} "
+                f"({probe_size:,} > {max_bytes:,} bytes)"
+            )
+            if on_log:
+                on_log(last_err)
+            continue
+
+        segment_time = trial_segment_time
+        num_parts = trial_num_parts
+        if on_log:
+            on_log(
+                f"ffmpeg per-part slice: {num_parts} part(s), ~{segment_time}s each "
+                f"(factor {factor})"
+            )
+        break
+
+    if segment_time is None or num_parts is None:
+        raise SplitError(
+            f"Unable to slice {base} under {max_bytes:,} bytes. Last: {last_err}"
+        )
+
+    original = base
+    for idx in range(num_parts):
+        if should_cancel and should_cancel():
+            from downloader import TransferCancelled
+            raise TransferCancelled("Upload cancelled")
+
+        start = idx * segment_time
+        seg_dur = min(segment_time, duration - start)
+        if seg_dur <= 0:
+            break
+
+        part_name = f"{stem}.PART{idx + 1}{ext}"
+        part_path = os.path.join(output_dir, part_name)
+        _extract_single_segment(
+            path,
+            part_path,
+            start,
+            seg_dur,
+            timeout=ffmpeg_timeout,
+            on_log=on_log,
+        )
+        part_size = os.path.getsize(part_path)
+        if part_size > max_bytes:
+            try:
+                os.remove(part_path)
+            except OSError:
+                pass
+            raise SplitError(
+                f"Part {idx + 1} ({part_name}) is {part_size:,} bytes "
+                f"(> {max_bytes:,}); try bytes mode or a smaller FILESTER_MAX_PART_BYTES"
+            )
+
+        yield {
+            "path": part_path,
+            "filename": part_name,
+            "size_bytes": part_size,
+            "part_index": idx + 1,
+            "part_count": num_parts,
+            "is_source": False,
+            "original_basename": original,
+            "split_mode": "ffmpeg_slice",
         }
 
     if delete_source:
