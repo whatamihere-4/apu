@@ -839,7 +839,11 @@ def _resolve_studio_for_autofill(
             if fs_label:
                 meta["filester_folder_label"] = fs_label
 
-    gallery, match_mode, matched_label = _gofile_folder_url_search(substudio, strip_vr=True)
+    gallery, match_mode, matched_label = (
+        _gofile_folder_url_search(substudio, strip_vr=True)
+        if GOFILE_ENABLED
+        else (None, None, None)
+    )
     if gallery:
         meta["folder_match"] = match_mode
         meta["folder_label"] = matched_label
@@ -849,7 +853,11 @@ def _resolve_studio_for_autofill(
         return substudio, gallery, meta
 
     if network:
-        gallery, match_mode, matched_label = _gofile_folder_url_search(network, strip_vr=False)
+        gallery, match_mode, matched_label = (
+            _gofile_folder_url_search(network, strip_vr=False)
+            if GOFILE_ENABLED
+            else (None, None, None)
+        )
         if gallery:
             meta["folder_match"] = match_mode
             meta["folder_label"] = matched_label
@@ -866,13 +874,24 @@ def _resolve_studio_for_autofill(
         meta["stashdb_studio"] = (alias.get("stashdb_studio") or substudio).strip()
         folder_label = (alias.get("folder_name") or "").strip()
         if folder_label:
-            gallery, match_mode, matched_label = _gofile_folder_url_search(
-                folder_label, strip_vr=False
-            )
-            if gallery:
-                meta["folder_match"] = match_mode
-                meta["folder_label"] = matched_label or folder_label
-                meta["matched_level"] = "alias"
+            if GOFILE_ENABLED:
+                gallery, match_mode, matched_label = _gofile_folder_url_search(
+                    folder_label, strip_vr=False
+                )
+                if gallery:
+                    meta["folder_match"] = match_mode
+                    meta["folder_label"] = matched_label or folder_label
+                    meta["matched_level"] = "alias"
+            elif FILESTER_ENABLED:
+                fs_url, fs_mode, fs_label = _filester_folder_url_search(
+                    folder_label, strip_vr=False
+                )
+                if fs_url:
+                    meta["filester_gallery_link"] = fs_url
+                    meta["filester_folder_match"] = fs_mode
+                    if fs_label:
+                        meta["filester_folder_label"] = fs_label
+                    meta["matched_level"] = "alias"
         display = (alias.get("studio_display") or "").strip()
         if display:
             studio_out = display
@@ -898,7 +917,7 @@ def api_resolve_studio():
         "network_studio": network or "",
         "meta": meta,
     }
-    if gallery_url:
+    if gallery_url and GOFILE_ENABLED:
         payload["gallery_link"] = gallery_url
         payload["gallery_match"] = meta.get("folder_match")
     fs_gallery = meta.get("filester_gallery_link")
@@ -1753,6 +1772,7 @@ def bbcode_page():
         split_name=split_name,
         split_mode=split_mode,
         active_providers=ACTIVE_PROVIDERS,
+        gofile_enabled=GOFILE_ENABLED,
         filester_enabled=FILESTER_ENABLED,
         filester_split_mode=FILESTER_SPLIT_MODE,
         stashdb_scenes_base=STASHDB_SCENES_BASE,
@@ -3038,7 +3058,7 @@ def api_stashdb_autofill():
         payload["studio_alias"] = studio_meta
     elif studio_meta.get("network_studio"):
         payload["studio_network"] = studio_meta
-    if gallery_url and not (data.get("skip_gallery") or False):
+    if gallery_url and not (data.get("skip_gallery") or False) and GOFILE_ENABLED:
         payload["gallery_link"] = gallery_url
         payload["gallery_match"] = studio_meta.get("folder_match")
         payload["gallery_matched_level"] = studio_meta.get("matched_level")

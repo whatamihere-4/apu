@@ -358,9 +358,14 @@
           <input type="text" id="studio">
         </div>
 
-        <div class="field" style="margin-bottom:0;">
-          <label for="gallery-link">Gallery Link</label>
-          <input type="url" id="gallery-link" placeholder="User defined gallery link">
+        <div class="field" id="gallery-link-row">
+          <label for="gallery-link" id="gallery-link-label">Gallery Link</label>
+          <input type="url" id="gallery-link" placeholder="GoFile gallery link">
+        </div>
+
+        <div class="field" id="filester-link-row" style="margin-bottom:0; display:none;">
+          <label for="filester-gallery-link" id="filester-link-label">Link</label>
+          <input type="url" id="filester-gallery-link" placeholder="https://filester.me/f/…">
         </div>
 
         <div id="helper-status"></div>
@@ -388,6 +393,7 @@
       splitMode: {{ split_mode|tojson }},
       filesterSplitMode: {{ filester_split_mode|tojson }},
       activeProviders: {{ active_providers|tojson }},
+      gofileEnabled: {{ gofile_enabled|tojson }},
       filesterEnabled: {{ filester_enabled|tojson }},
       stashdbScenesBase: {{ stashdb_scenes_base|tojson }},
     };
@@ -430,12 +436,54 @@
     const stashdbAutofillBtn = document.getElementById("stashdb-autofill-btn");
     const stashdbStatusEl = document.getElementById("stashdb-status");
 
-    const fieldIds = ["title", "resolution", "upload-date", "studio", "gallery-link"];
+    const fieldIds = [
+      "title", "resolution", "upload-date", "studio",
+      "gallery-link", "filester-gallery-link",
+    ];
     const fields = Object.fromEntries(
       [...fieldIds, "image-bbcode"].map((id) => [id, document.getElementById(id)])
     );
 
-    let sceneImages = [];
+    function isGofileOn() {
+      return !!(PAGE_DATA.gofileEnabled || (PAGE_DATA.activeProviders || []).includes("gofile"));
+    }
+
+    function isFilesterOn() {
+      return !!(PAGE_DATA.filesterEnabled || (PAGE_DATA.activeProviders || []).includes("filester"));
+    }
+
+    function getFilesterLinkValue() {
+      const el = fields["filester-gallery-link"];
+      return (el ? el.value : filesterGalleryLink || "").trim();
+    }
+
+    function setFilesterLinkValue(url) {
+      filesterGalleryLink = (url || "").trim();
+      if (fields["filester-gallery-link"]) {
+        fields["filester-gallery-link"].value = filesterGalleryLink;
+      }
+    }
+
+    function hasPrimaryGalleryFilled() {
+      if (isGofileOn()) return !!fields["gallery-link"].value.trim();
+      if (isFilesterOn()) return !!getFilesterLinkValue();
+      return false;
+    }
+
+    function updateUploadProviderFields() {
+      const gofileOn = isGofileOn();
+      const filesterOn = isFilesterOn();
+      const gofileRow = document.getElementById("gallery-link-row");
+      const filesterRow = document.getElementById("filester-link-row");
+      const filesterLabel = document.getElementById("filester-link-label");
+      if (gofileRow) gofileRow.style.display = gofileOn ? "" : "none";
+      if (filesterRow) filesterRow.style.display = filesterOn ? "" : "none";
+      if (filesterLabel) {
+        filesterLabel.textContent = gofileOn ? "Filester Mirror" : "Link";
+      }
+    }
+    updateUploadProviderFields();
+
     let imageIndex = 0;
     /** True after /api/thumb_sheet loads in the preview <img>. */
     let thumbSheetAvailable = false;
@@ -828,31 +876,35 @@ This file was split into ${splitState.parts} byte-range parts (not playable unti
       const resolution = fields["resolution"].value.trim();
       const uploadDate = fields["upload-date"].value.trim();
       const studio = fields["studio"].value.trim();
-      const galleryLink = fields["gallery-link"].value.trim();
+      const gofileOn = isGofileOn();
+      const filesterOn = isFilesterOn();
+      const galleryLink = gofileOn ? fields["gallery-link"].value.trim() : "";
+      const fsLink = filesterOn ? getFilesterLinkValue() : "";
       const gofileCell = galleryLink
         ? `[URL unfurl="false"]${galleryLink}[/URL]`
         : "";
-      const mirrorCell = filesterGalleryLink
-        ? `[URL]${filesterGalleryLink}[/URL]`
+      const filesterCell = fsLink
+        ? `[URL]${fsLink}[/URL]`
         : "";
-      const linkRow = galleryLink
-        ? `[TR]
+      let linkRow = "";
+      let mirrorRow = "";
+      if (gofileOn && galleryLink) {
+        linkRow = `[TR]
 [td width="25%"]Link[/td][td width="75%"]${gofileCell}[/td]
 [/TR]
-`
-        : "";
-      const mirrorRow = filesterGalleryLink
-        ? `[TR]
-[td width="25%"]Mirror[/td][td width="75%"]${mirrorCell}[/td]
+`;
+      }
+      if (gofileOn && filesterOn && fsLink) {
+        mirrorRow = `[TR]
+[td width="25%"]Mirror[/td][td width="75%"]${filesterCell}[/td]
 [/TR]
-`
-        : "";
-      const fallbackLinkRow = !galleryLink && filesterGalleryLink
-        ? `[TR]
-[td width="25%"]Link[/td][td width="75%"]${mirrorCell}[/td]
+`;
+      } else if (!gofileOn && filesterOn && fsLink) {
+        linkRow = `[TR]
+[td width="25%"]Link[/td][td width="75%"]${filesterCell}[/td]
 [/TR]
-`
-        : "";
+`;
+      }
       const threadRow = threadUrl
         ? `[TR]
 [td width="25%"]Thread[/td][td width="75%"][URL unfurl="false"]${threadUrl}[/URL][/td]
@@ -873,7 +925,7 @@ ${imageBbcode}
 [TR]
 [td width="25%"]Studio[/td][td width="75%"]${studio}[/td]
 [/TR]
-${threadRow}${linkRow}${mirrorRow}${fallbackLinkRow}[/TABLE]${splitBlock}`;
+${threadRow}${linkRow}${mirrorRow}[/TABLE]${splitBlock}`;
       outputEl.value = output;
     }
 
@@ -881,8 +933,9 @@ ${threadRow}${linkRow}${mirrorRow}${fallbackLinkRow}[/TABLE]${splitBlock}`;
       const fn = (activeFilename || "").trim();
       if (!fn) return;
       const studio = fields["studio"].value.trim();
-      const galleryLink = fields["gallery-link"].value.trim();
-      if (!studio && !galleryLink) return;
+      const galleryLink = isGofileOn() ? fields["gallery-link"].value.trim() : "";
+      const fsLink = isFilesterOn() ? getFilesterLinkValue() : "";
+      if (!studio && !galleryLink && !fsLink) return;
       const r = await fetch("/api/scenes_bbcode_save", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1121,7 +1174,7 @@ ${threadRow}${linkRow}${mirrorRow}${fallbackLinkRow}[/TABLE]${splitBlock}`;
         fields["studio"].value = studioName;
         await applyStudioResolution(studioName, {
           network: networkName,
-          fillGallery: !fields["gallery-link"].value.trim(),
+          fillGallery: !hasPrimaryGalleryFilled(),
         });
 
         const metaBits = [];
@@ -1181,9 +1234,9 @@ ${threadRow}${linkRow}${mirrorRow}${fallbackLinkRow}[/TABLE]${splitBlock}`;
         if (!r.ok || data.error) return null;
         if (data.studio) fields["studio"].value = data.studio;
         if (data.thread_url) threadUrl = data.thread_url;
-        if (data.filester_gallery_link) filesterGalleryLink = data.filester_gallery_link;
+        if (data.filester_gallery_link) setFilesterLinkValue(data.filester_gallery_link);
         const fillGallery = opts.fillGallery !== false;
-        if (fillGallery && data.gallery_link && !fields["gallery-link"].value.trim()) {
+        if (fillGallery && isGofileOn() && data.gallery_link && !fields["gallery-link"].value.trim()) {
           fields["gallery-link"].value = data.gallery_link;
         }
         composeBbcode();
@@ -1212,14 +1265,18 @@ ${threadRow}${linkRow}${mirrorRow}${fallbackLinkRow}[/TABLE]${splitBlock}`;
         if (bb.studio && !fields["studio"].value.trim()) {
           fields["studio"].value = bb.studio;
         }
-        if (bb.gallery_link && !fields["gallery-link"].value.trim()) {
-          fields["gallery-link"].value = bb.gallery_link;
+        if (bb.gallery_link) {
+          if (isGofileOn() && !fields["gallery-link"].value.trim()) {
+            fields["gallery-link"].value = bb.gallery_link;
+          } else if (isFilesterOn() && !isGofileOn() && !getFilesterLinkValue()) {
+            setFilesterLinkValue(bb.gallery_link);
+          }
         }
         const upload = (data.entry && data.entry.upload) || {};
-        if (upload.gofile_url && !fields["gallery-link"].value.trim()) {
+        if (upload.gofile_url && isGofileOn() && !fields["gallery-link"].value.trim()) {
           fields["gallery-link"].value = upload.gofile_url;
         }
-        if (upload.filester_url) filesterGalleryLink = upload.filester_url;
+        if (upload.filester_url) setFilesterLinkValue(upload.filester_url);
         if (bb.stashdb_url && !stashdbLinkEl.value.trim()) {
           stashdbLinkEl.value = bb.stashdb_url;
         }
@@ -1300,7 +1357,7 @@ ${threadRow}${linkRow}${mirrorRow}${fallbackLinkRow}[/TABLE]${splitBlock}`;
       const studioNow = fields["studio"].value.trim();
       if (studioNow) {
         await applyStudioResolution(studioNow, {
-          fillGallery: !fields["gallery-link"].value.trim(),
+          fillGallery: !hasPrimaryGalleryFilled(),
         });
       }
     }
@@ -1406,8 +1463,8 @@ ${threadRow}${linkRow}${mirrorRow}${fallbackLinkRow}[/TABLE]${splitBlock}`;
         fields["upload-date"].value = data.upload_date || "";
         fields["studio"].value = data.studio || "";
         if (data.thread_url) threadUrl = data.thread_url;
-        if (data.filester_gallery_link) filesterGalleryLink = data.filester_gallery_link;
-        if (data.gallery_link && !fields["gallery-link"].value.trim()) {
+        if (data.filester_gallery_link) setFilesterLinkValue(data.filester_gallery_link);
+        if (isGofileOn() && data.gallery_link && !fields["gallery-link"].value.trim()) {
           fields["gallery-link"].value = data.gallery_link;
         }
         if (data.image_bbcode) {
@@ -1423,10 +1480,11 @@ ${threadRow}${linkRow}${mirrorRow}${fallbackLinkRow}[/TABLE]${splitBlock}`;
         } else if (data.studio) {
           await applyStudioResolution(data.studio, {
             network: data.network_studio || "",
-            fillGallery: !fields["gallery-link"].value.trim(),
+            fillGallery: !hasPrimaryGalleryFilled(),
           });
         }
         if (
+          isGofileOn() &&
           !fields["gallery-link"].value.trim() &&
           data.gallery_link
         ) {
@@ -1442,11 +1500,15 @@ ${threadRow}${linkRow}${mirrorRow}${fallbackLinkRow}[/TABLE]${splitBlock}`;
         stashdbStatusEl.className = "ok";
         const src = data.source ? ` (${data.source})` : "";
         let note = "Autofill complete" + src + ".";
-        if (data.gallery_link && !activeFilename) {
-          note += " Gallery from gofile-folders.json";
-          if (data.gallery_match) note += ` (${data.gallery_match} match)`;
-          if (data.studio_alias) note += " via alias";
-          note += ".";
+        if (!activeFilename) {
+          if (isGofileOn() && data.gallery_link) {
+            note += " Gallery from gofile-folders.json";
+            if (data.gallery_match) note += ` (${data.gallery_match} match)`;
+            if (data.studio_alias) note += " via alias";
+            note += ".";
+          } else if (isFilesterOn() && data.filester_gallery_link) {
+            note += " Gallery from filester-folders.json.";
+          }
         }
         if (activeFilename && (data.scene_id || data.edit_id || data.draft_id || data.id)) {
           note += " Linked to cached file in scenes.json.";
@@ -1548,11 +1610,11 @@ ${threadRow}${linkRow}${mirrorRow}${fallbackLinkRow}[/TABLE]${splitBlock}`;
     (async function initBbcode() {
       await loadLearnedResolutionPresets();
       const galleryFromQuery = PAGE_DATA.gallery || parseGalleryFromQuery();
-      if (galleryFromQuery && !fields["gallery-link"].value.trim()) {
+      if (isGofileOn() && galleryFromQuery && !fields["gallery-link"].value.trim()) {
         fields["gallery-link"].value = galleryFromQuery;
       }
       const filesterFromQuery = PAGE_DATA.galleryFilester || parseGalleryFilesterFromQuery();
-      if (filesterFromQuery) filesterGalleryLink = filesterFromQuery;
+      if (filesterFromQuery) setFilesterLinkValue(filesterFromQuery);
       const splitFromQuery = parseSplitFromQuery();
       if (splitFromQuery) applySplitState(splitFromQuery);
       await loadCachedFilesList(activeFilename);
