@@ -1,6 +1,6 @@
-"""Disk-backed pending upload queue for gofup/monolith.
+"""Disk-backed pending upload queue for apu/monolith.
 
-Survives container restarts when GOFUP_RESTORE_QUEUE is enabled (default on).
+Survives container restarts when RESTORE_QUEUE is enabled (default on).
 """
 from __future__ import annotations
 

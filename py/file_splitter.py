@@ -7,7 +7,7 @@ the source container/codecs. Parts are named ``<name>.PART1.<ext>``,
 
     ffmpeg -f concat -safe 0 -i "concat:movie.PART1.mkv|movie.PART2.mkv" -c copy movie.mkv
 
-Used in-process by gofup and by the splitter-http sidecar.
+Used in-process by apu and by the splitter-http sidecar.
 """
 from __future__ import annotations
 

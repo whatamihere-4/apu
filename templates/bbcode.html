@@ -296,51 +296,45 @@
         </div>
 
         <div class="field">
-          <label for="image-bbcode">Image Embed BBCode (two images)</label>
-          <textarea id="image-bbcode" placeholder="[IMG]...[/IMG]&#10;[IMG]...[/IMG]"></textarea>
+          <label for="image-bbcode">Image Embed BBCode (cover + thumbs + GIF)</label>
+          <textarea id="image-bbcode" placeholder="[IMG]cover[/IMG][IMG]thumbs[/IMG][IMG]gif[/IMG]"></textarea>
           <div class="image-tools" style="margin-top:0.5rem;">
             <button
               type="button"
               class="btn secondary"
-              data-chevereto-pup-trigger
-              data-target="#image-bbcode"
-              title="Open JPG6 uploader and insert BBCode into the Image Embed field"
+              id="goonbox-server-upload-btn"
+              title="Upload StashDB cover, thumbnail sheet, and SLR preview GIF to GoonBox (server-side)"
+              {% if not goonbox_configured %}disabled{% endif %}
             >
-              Upload images (JPG6 plugin)
+              Upload to GoonBox (auto)
+            </button>
+            <button
+              type="button"
+              class="btn secondary"
+              id="goonbox-upload-btn"
+              title="Open GoonBox uploader popup and append BBCode into the Image Embed field"
+            >
+              Upload images (GoonBox popup)
             </button>
             <a
-              id="jpg6-open-upload"
+              id="goonbox-open-upload"
               class="btn secondary"
-              href="https://jpg6.su/upload"
+              href="{{ goonbox_base_url }}/upload"
               target="_blank"
               rel="noopener"
-              title="Fallback: open JPG6 upload page directly"
+              title="Fallback: open GoonBox upload page directly"
             >
-              Open JPG6 upload
+              Open GoonBox upload
             </a>
           </div>
-          <div class="jpg6-album-row" style="margin-top:0.4rem;">
-            <label for="jpg6-to-album">Default JPG6 album (optional)</label>
-            <input
-              type="text"
-              id="jpg6-to-album"
-              placeholder="Album URL or id (e.g. jpg6.su/a/…)"
-              autocomplete="off"
-              spellcheck="false"
-              {% if jpg6_to_album %}readonly{% endif %}
-              value="{{ jpg6_to_album|e }}"
-            >
-            <div class="image-tools" style="margin-top:0.4rem;">
-              <button type="button" class="btn secondary" id="jpg6-to-album-apply" {% if jpg6_to_album %}disabled{% endif %}>Save album &amp; reload</button>
-            </div>
-            <p style="margin:0.35rem 0 0;font-size:12px;opacity:0.85;">
-              {% if jpg6_to_album %}
-              Set by server env <code>JPG6_TO_ALBUM</code> (applies to everyone using this app). Chevereto 3 expects the encoded id in <code>?toAlbum=</code> (for URLs like <code>/a/user.ajDeMe</code>, that's the part after the dot); log in as the album owner.
-              {% else %}
-              Stored in this browser only. The upload URL uses <code>?toAlbum=</code> with the encoded album id (after the dot in <code>/a/user.encodedId</code> if applicable).
-              {% endif %}
-            </p>
-          </div>
+          <p id="goonbox-upload-status" style="margin:0.35rem 0 0;font-size:12px;opacity:0.85;">
+            {% if goonbox_configured %}
+            Server upload uses session cookies or a Bearer token (see .env). Order is always cover → thumbs → GIF, concatenated with no spaces.
+            {% if goonbox_auto_upload %} Auto-upload runs after a StashDB scene is loaded.{% endif %}
+            {% else %}
+            Set <code>GOONBOX_SESSION</code> + <code>GOONBOX_XSRF_TOKEN</code> (or <code>GOONBOX_AUTH_TOKEN</code>) in .env — run <code>scripts/test_goonbox_auth.py</code> to verify.
+            {% endif %}
+          </p>
         </div>
 
         <div class="field">
@@ -395,6 +389,9 @@
       activeProviders: {{ active_providers|tojson }},
       gofileEnabled: {{ gofile_enabled|tojson }},
       filesterEnabled: {{ filester_enabled|tojson }},
+      goonboxBaseUrl: {{ goonbox_base_url|tojson }},
+      goonboxConfigured: {{ goonbox_configured|tojson }},
+      goonboxAutoUpload: {{ goonbox_auto_upload|tojson }},
       stashdbScenesBase: {{ stashdb_scenes_base|tojson }},
     };
     let activeFilename = (PAGE_DATA.filename || "").trim();
@@ -435,6 +432,9 @@
     const cachedFileHintEl = document.getElementById("cached-file-hint");
     const stashdbAutofillBtn = document.getElementById("stashdb-autofill-btn");
     const stashdbStatusEl = document.getElementById("stashdb-status");
+    const goonboxServerUploadBtn = document.getElementById("goonbox-server-upload-btn");
+    const goonboxUploadStatusEl = document.getElementById("goonbox-upload-status");
+    let goonboxUploadBusy = false;
 
     const fieldIds = [
       "title", "resolution", "upload-date", "studio",
@@ -529,7 +529,7 @@
       return d.innerHTML;
     }
 
-    /** Image BBCode: single line (no whitespace). JPG6 medium embed uses `.md.gif` preview URLs; strip `md` so GIFs animate. */
+    /** Image BBCode: single line (no whitespace). Legacy Chevereto `.md.gif` previews strip `md` so GIFs animate. */
     function sanitizeImageBbcodeInput(text) {
       return String(text || "")
         .replace(/\s/g, "")
@@ -807,63 +807,9 @@
       };
     }
 
-    function splitBasenameParts(name) {
-      const base = (name || splitState.basename || activeFilename || "").trim();
-      const dot = base.lastIndexOf(".");
-      if (dot > 0) return { stem: base.slice(0, dot), ext: base.slice(dot), original: base };
-      return { stem: base, ext: "", original: base };
-    }
-
-    function windowsCopyCommand(baseName, partCount, original) {
-      const chunks = [];
-      for (let i = 1; i <= partCount; i++) {
-        chunks.push(`${baseName}.part${String(i).padStart(3, "0")}`);
-      }
-      return `copy /b ${chunks.join("+")} ${original}`;
-    }
-
     function parseGalleryFilesterFromQuery() {
       const p = new URLSearchParams(window.location.search);
       return (p.get("gallery_filester") || "").trim();
-    }
-
-    function splitReassemblyBbcode() {
-      const providers = PAGE_DATA.activeProviders || [];
-      const filesterOn = PAGE_DATA.filesterEnabled || providers.includes("filester");
-      if (!filesterOn) return "";
-      if (!(splitState.parts > 1)) return "";
-      const { stem, ext, original } = splitBasenameParts(splitState.basename);
-      if (!original) return "";
-      const mode = (splitState.mode || "bytes").toLowerCase();
-
-      if (mode === "ffmpeg" || mode === "ffmpeg_slice") {
-        const listCmd = `printf "file '%s'\\n" ${stem}.PART*${ext} > parts.txt`;
-        const joinCmd = `ffmpeg -f concat -safe 0 -i parts.txt -c copy ${original}`;
-        return `
-
-[HEADING=2]Reassembly (split upload)[/HEADING]
-This file was split into ${splitState.parts} independently playable parts (ffmpeg stream-copy). Each part can be previewed before download. To restore the full file:
-
-[b]Linux / macOS / Windows[/b]
-[CODE]${listCmd}
-${joinCmd}[/CODE]`;
-      }
-
-      const linuxCmd = `cat ${original}.part* > ${original}`;
-      const winCmd = windowsCopyCommand(original, splitState.parts, original);
-      return `
-
-[HEADING=2]Reassembly (split upload)[/HEADING]
-This file was split into ${splitState.parts} byte-range parts (not playable until merged). Download every part, then merge in order:
-
-[b]Linux / macOS[/b]
-[CODE]${linuxCmd}[/CODE]
-
-[b]Windows (Command Prompt)[/b]
-[CODE]${winCmd}[/CODE]
-
-[b]Windows (PowerShell)[/b]
-[CODE]cmd /c ${winCmd}[/CODE]`;
     }
 
     function composeBbcode() {
@@ -911,8 +857,6 @@ This file was split into ${splitState.parts} byte-range parts (not playable unti
 [/TR]
 `
         : "";
-      const splitBlock = splitReassemblyBbcode();
-
       const output = `[HEADING=1]${actressPart} - ${title}[/HEADING]
 ${imageBbcode}
 [TABLE width="50%"]
@@ -925,7 +869,7 @@ ${imageBbcode}
 [TR]
 [td width="25%"]Studio[/td][td width="75%"]${studio}[/td]
 [/TR]
-${threadRow}${linkRow}${mirrorRow}[/TABLE]${splitBlock}`;
+${threadRow}${linkRow}${mirrorRow}[/TABLE]`;
       outputEl.value = output;
     }
 
@@ -1065,8 +1009,8 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]${splitBlock}`;
         thumbSheetImgEl.hidden = true;
         thumbSheetMissingEl.hidden = false;
         thumbSheetMissingEl.textContent =
-          "Could not load the sheet. Ensure thumber wrote <stem>_thumbs.png and gofup mounts " +
-          "the same host folder as thumber's THUMBER_THUMBS at /thumbs (GOFUP_THUMBS in compose).";
+          "Could not load the sheet. Ensure thumber wrote <stem>_thumbs.png and apu mounts " +
+          "the same host folder as thumber's THUMBER_THUMBS at /thumbs (THUMBS_DIR / MEDIA_THUMBS_DIR in compose).";
         downloadThumbPngEl.style.visibility = "hidden";
       };
       thumbSheetImgEl.src = url;
@@ -1144,6 +1088,71 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]${splitBlock}`;
       downloadBothBtn.disabled = false;
     }
 
+    function setGoonboxUploadStatus(text, kind) {
+      if (!goonboxUploadStatusEl) return;
+      goonboxUploadStatusEl.className = kind === "err" ? "err" : kind === "ok" ? "ok" : "";
+      goonboxUploadStatusEl.textContent = text;
+    }
+
+    async function uploadBbcodeImagesToGoonbox(opts = {}) {
+      const silent = !!opts.silent;
+      if (!PAGE_DATA.goonboxConfigured) {
+        if (!silent) setGoonboxUploadStatus("GoonBox auth is not configured on the server.", "err");
+        return false;
+      }
+      if (!activeSceneId) {
+        if (!silent) setGoonboxUploadStatus("Load a StashDB scene first.", "err");
+        return false;
+      }
+      if (goonboxUploadBusy) return false;
+      goonboxUploadBusy = true;
+      if (goonboxServerUploadBtn) goonboxServerUploadBtn.disabled = true;
+      if (!silent) setGoonboxUploadStatus("Uploading cover, thumbs, and GIF to GoonBox…", "");
+      try {
+        const body = {
+          scene_id: activeSceneId,
+          filename: activeFilename || undefined,
+          slr_code: slrPreviewCode || undefined,
+        };
+        const r = await fetch("/api/bbcode_goonbox_upload", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const data = await r.json();
+        if (!r.ok || data.error) throw new Error(data.error || `HTTP ${r.status}`);
+        const imageBbcodeEl = fields["image-bbcode"];
+        imageBbcodeEl.value = sanitizeImageBbcodeInput(data.image_bbcode || "");
+        composeBbcode();
+        const skipped = Array.isArray(data.skipped) ? data.skipped : [];
+        const parts = Array.isArray(data.parts) ? data.parts : [];
+        let note = `Uploaded ${parts.length} image(s) to GoonBox.`;
+        if (skipped.length) {
+          const reasons = skipped.map((s) => `${s.kind}: ${s.reason}`).join("; ");
+          note += ` Skipped: ${reasons}.`;
+        }
+        setGoonboxUploadStatus(note, skipped.length && !parts.length ? "err" : "ok");
+        if (!silent) {
+          helperStatusEl.className = "ok";
+          helperStatusEl.textContent = "GoonBox upload complete.";
+        }
+        return true;
+      } catch (err) {
+        const msg = err.message || String(err);
+        setGoonboxUploadStatus("GoonBox upload failed: " + msg, "err");
+        if (!silent) {
+          helperStatusEl.className = "err";
+          helperStatusEl.textContent = "GoonBox upload failed.";
+        }
+        return false;
+      } finally {
+        goonboxUploadBusy = false;
+        if (goonboxServerUploadBtn && PAGE_DATA.goonboxConfigured) {
+          goonboxServerUploadBtn.disabled = false;
+        }
+      }
+    }
+
     async function loadScene() {
       if (!activeSceneId) {
         sceneMetaEl.innerHTML =
@@ -1206,6 +1215,9 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]${splitBlock}`;
         }
 
         composeBbcode();
+        if (PAGE_DATA.goonboxAutoUpload && PAGE_DATA.goonboxConfigured) {
+          await uploadBbcodeImagesToGoonbox({ silent: true });
+        }
         helperStatusEl.className = "ok";
         helperStatusEl.textContent = "Scene loaded.";
       } catch (err) {
@@ -1467,7 +1479,10 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]${splitBlock}`;
         if (isGofileOn() && data.gallery_link && !fields["gallery-link"].value.trim()) {
           fields["gallery-link"].value = data.gallery_link;
         }
-        if (data.image_bbcode) {
+        if (
+          data.image_bbcode &&
+          !(PAGE_DATA.goonboxAutoUpload && PAGE_DATA.goonboxConfigured)
+        ) {
           fields["image-bbcode"].value = sanitizeImageBbcodeInput(data.image_bbcode);
         }
         if (data.scene_url) stashdbLinkEl.value = data.scene_url;
@@ -1539,6 +1554,11 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]${splitBlock}`;
       }
     });
     stashdbAutofillBtn.addEventListener("click", () => { void autofillFromStashdb(); });
+    if (goonboxServerUploadBtn) {
+      goonboxServerUploadBtn.addEventListener("click", () => {
+        void uploadBbcodeImagesToGoonbox();
+      });
+    }
     fieldIds.forEach((id) => fields[id].addEventListener("input", composeBbcode));
     imageNextBtn.addEventListener("click", () => showSceneImage(imageIndex + 1));
 
@@ -1631,74 +1651,52 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]${splitBlock}`;
       composeBbcode();
     })();
   </script>
-  <script id="jpg6-pup-bootstrap">
+  <script id="goonbox-plugin-bootstrap">
     (function () {
-      const STORAGE_KEY = "monolithJpg6ToAlbum";
-      const UPLOAD_BASE = "https://jpg6.su/upload";
-      const FROM_SERVER = {{ (jpg6_to_album or "")|tojson }};
-      function effectiveAlbumId() {
-        const s = (FROM_SERVER || "").trim();
-        if (s) return s;
-        try {
-          return (localStorage.getItem(STORAGE_KEY) || "").trim();
-        } catch (_e) {
-          return "";
-        }
-      }
-      function cheveretoToAlbumToken(raw) {
-        const s = String(raw || "")
-          .trim()
-          .replace(/\/+$/, "");
-        if (!s) return "";
-        const seg = s.split("/").filter(Boolean).pop() || s;
-        const bits = seg.split(".");
-        if (bits.length >= 2) return bits[1] ? bits[1] : bits[0];
-        return bits[0];
-      }
-      function monolithJpg6UploadUrl() {
-        const k = effectiveAlbumId();
-        if (!k) return UPLOAD_BASE;
-        const token = cheveretoToAlbumToken(k);
-        return token ? UPLOAD_BASE + "?toAlbum=" + encodeURIComponent(token) : UPLOAD_BASE;
-      }
-      window.monolithJpg6UploadUrl = monolithJpg6UploadUrl;
+      const GOONBOX_BASE = {{ goonbox_base_url|tojson }};
+      const script = document.createElement("script");
+      script.src = GOONBOX_BASE.replace(/\/+$/, "") + "/assets/plugin.js";
+      script.setAttribute("data-auto-inject", "false");
+      script.async = false;
+      const boot = document.getElementById("goonbox-plugin-bootstrap");
+      (boot || document.body).insertAdjacentElement("afterend", script);
 
-      const pup = document.createElement("script");
-      // Chevereto PUP reads config from document.currentScript OR #chevereto-pup-src.
-      // Dynamic + async scripts often leave currentScript null; without the id, data-url
-      // (incl. ?toAlbum=) is ignored and the popup opens plain /upload.
-      pup.id = "chevereto-pup-src";
-      pup.async = false;
-      pup.src = "https://jpg6.su/sdk/pup.js";
-      pup.setAttribute("data-url", monolithJpg6UploadUrl());
-      pup.setAttribute("data-mode", "manual");
-      pup.setAttribute("data-auto-insert", "bbcode-embed-medium");
-      pup.setAttribute("data-lang", "en");
-      const boot = document.getElementById("jpg6-pup-bootstrap");
-      (boot || document.body).insertAdjacentElement("afterend", pup);
+      function appendImageBbcode(bbcode) {
+        const bb = String(bbcode || "").trim();
+        if (!bb) return;
+        const el = document.getElementById("image-bbcode");
+        if (!el) return;
+        const merged = el.value ? el.value + " " + bb : bb;
+        const sanitized = sanitizeImageBbcodeInput(merged);
+        el.value = sanitized;
+        composeBbcode();
+      }
+
+      window.addEventListener("imgUploaded", (e) => {
+        appendImageBbcode(e.detail?.bbcode);
+      });
+
+      window.addEventListener("message", (e) => {
+        const base = GOONBOX_BASE.replace(/\/+$/, "");
+        if (e.origin !== base) return;
+        const data = e.data;
+        if (!data || data.type !== "img_embed") return;
+        appendImageBbcode(data.payload?.bbcode);
+      });
 
       document.addEventListener("DOMContentLoaded", () => {
-        const openA = document.getElementById("jpg6-open-upload");
-        if (openA) openA.href = monolithJpg6UploadUrl();
-        const inp = document.getElementById("jpg6-to-album");
-        const apply = document.getElementById("jpg6-to-album-apply");
-        if (inp) {
-          if ((FROM_SERVER || "").trim()) {
-            inp.value = (FROM_SERVER || "").trim();
-          } else {
-            try {
-              inp.value = localStorage.getItem(STORAGE_KEY) || "";
-            } catch (_e) {}
-          }
-        }
-        if (apply && inp) {
-          apply.addEventListener("click", () => {
-            const v = (inp.value || "").trim();
-            try {
-              if (v) localStorage.setItem(STORAGE_KEY, v);
-              else localStorage.removeItem(STORAGE_KEY);
-            } catch (_e) {}
-            location.reload();
+        const btn = document.getElementById("goonbox-upload-btn");
+        if (btn) {
+          btn.addEventListener("click", () => {
+            if (window.ImgUpload && typeof window.ImgUpload.open === "function") {
+              window.ImgUpload.open();
+            } else {
+              window.open(
+                GOONBOX_BASE.replace(/\/+$/, "") + "/upload",
+                "img_upload",
+                "width=600,height=700,scrollbars=yes,resizable=yes"
+              );
+            }
           });
         }
       });

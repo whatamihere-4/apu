@@ -4,7 +4,7 @@
 #   2) runtime: alpine + ffmpeg/ffprobe + python3 HTTP wrapper + the phasher binary
 #
 # This service computes Stash-compatible fingerprints (OSHASH, MD5, PHASH) so callers
-# (e.g. gofup) can short-circuit duplicate detection against StashDB before falling back
+# (e.g. apu) can short-circuit duplicate detection against StashDB before falling back
 # to the slow PHASH step.
 
 ARG STASH_REF=v0.27.2

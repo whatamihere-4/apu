@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>gofup</title>
+  <title>apu</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -175,6 +175,20 @@
     }
     .cancel-btn:hover { background: var(--error); color: #fff; }
 
+    .job-actions {
+      display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.55rem;
+    }
+    .job-action-btn {
+      padding: 0.28rem 0.55rem; font-size: 0.68rem; font-weight: 600;
+      border: 1px solid var(--border); border-radius: 4px; cursor: pointer;
+      background: transparent; color: var(--muted);
+      transition: background 0.15s, color 0.15s, border-color 0.15s;
+    }
+    .job-action-btn:hover:not(:disabled) {
+      border-color: var(--accent); color: var(--accent);
+    }
+    .job-action-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
     .progress-wrap { width: 100%; height: 6px; background: var(--bg); border-radius: 3px; overflow: hidden; }
     .progress-bar {
       height: 100%; background: var(--accent); border-radius: 3px;
@@ -211,7 +225,7 @@
   </style>
 </head>
 <body>
-  <h1>gofup</h1>
+  <h1>apu</h1>
   <p class="subtitle" id="provider-subtitle">Upload &mdash; from link or file</p>
   <p class="subtitle" style="margin-top:-0.5rem;">
     <a href="/bbcode" style="color:var(--accent); text-decoration:none;">BBCode generator</a>
@@ -304,6 +318,7 @@
     let selectedPath = null;
     let jobsPollTimer = null;
     let jobsPollInFlight = false;
+    const jobDataCache = new Map();
 
     async function api(endpoint, body) {
       const r = await fetch(endpoint, {
@@ -422,7 +437,11 @@
         `<div class="job-status"></div>` +
         `<div class="progress-wrap"><div class="progress-bar"></div></div>` +
         `<div class="progress-detail"></div>` +
-        `<div class="progress-log"></div>`;
+        `<div class="progress-log"></div>` +
+        `<div class="job-actions">` +
+          `<button type="button" class="job-action-btn" data-action="copy-link" data-jid="${id}">Copy link</button>` +
+          `<button type="button" class="job-action-btn" data-action="retry" data-jid="${id}">Retry</button>` +
+        `</div>`;
       area.appendChild(el);
       return el;
     }
@@ -449,7 +468,58 @@
       });
     }
 
+    function collectJobUrls(job) {
+      const urls = [];
+      if (job.download_page_gofile) urls.push(job.download_page_gofile);
+      if (job.download_page_filester) urls.push(job.download_page_filester);
+      if (!urls.length && job.download_page) {
+        job.download_page.split(' | ').forEach((u) => {
+          const t = u.trim();
+          if (t) urls.push(t);
+        });
+      }
+      return urls;
+    }
+
+    function jobLinkDisplayText(job, url) {
+      if (!providerConfig || !providerConfig.job_links_filename_only) return url;
+      const fn = (job.source_filename || '').trim();
+      if (fn) return fn;
+      const sp = (job.source_path || '').trim();
+      if (sp) return sp.split('/').pop();
+      try {
+        return new URL(url).pathname.split('/').filter(Boolean).pop() || url;
+      } catch (_e) {
+        return url;
+      }
+    }
+
+    function jobLinkLine(label, url, job) {
+      const text = jobLinkDisplayText(job, url);
+      return `${label} &mdash; <a class="job-link" href="${escHtml(url)}" target="_blank">${escHtml(text)}</a>`;
+    }
+
+    function updateJobActions(id, job) {
+      const el = document.getElementById(`job-${id}`);
+      if (!el) return;
+      const actionsEl = el.querySelector('.job-actions');
+      if (!actionsEl) return;
+      const copyBtn = actionsEl.querySelector('[data-action="copy-link"]');
+      const retryBtn = actionsEl.querySelector('[data-action="retry"]');
+      const urls = collectJobUrls(job);
+      const isTerminal = ['done', 'error', 'cancelled'].includes(job.status);
+      const canRetry = isTerminal && !!(job.source_url || job.source_path);
+      if (copyBtn) {
+        copyBtn.disabled = !urls.length;
+        copyBtn.style.display = urls.length ? '' : 'none';
+      }
+      if (retryBtn) {
+        retryBtn.style.display = canRetry ? '' : 'none';
+      }
+    }
+
     function renderJob(id, job) {
+      jobDataCache.set(id, job);
       const el = ensureJobEl(id, job.title || id, job.folder_name || '');
       const statusEl  = el.querySelector('.job-status');
       const barEl     = el.querySelector('.progress-bar');
@@ -469,19 +539,13 @@
         const fs = job.download_page_filester || '';
         const legacy = job.download_page || '';
         if (gf) {
-          lines.push(
-            `GoFile &mdash; <a class="job-link" href="${escHtml(gf)}" target="_blank">${escHtml(gf)}</a>`
-          );
+          lines.push(jobLinkLine('GoFile', gf, job));
         }
         if (fs) {
-          lines.push(
-            `Filester &mdash; <a class="job-link" href="${escHtml(fs)}" target="_blank">${escHtml(fs)}</a>`
-          );
+          lines.push(jobLinkLine('Filester', fs, job));
         }
         if (!gf && !fs && legacy) {
-          lines.push(
-            `Done &mdash; <a class="job-link" href="${escHtml(legacy)}" target="_blank">${escHtml(legacy)}</a>`
-          );
+          lines.push(jobLinkLine('Done', legacy, job));
         }
         if (!lines.length) lines.push('Done');
         if (job.filester_skipped_reason) {
@@ -691,7 +755,83 @@
         logEl.textContent = '';
         logEl.dataset.thumberFollow = '';
       }
+      updateJobActions(id, job);
     }
+
+    async function copyJobLinks(jobId, btn) {
+      const job = jobDataCache.get(jobId);
+      if (!job) return;
+      const urls = collectJobUrls(job);
+      if (!urls.length) return;
+      const text = urls.join('\n');
+      try {
+        await navigator.clipboard.writeText(text);
+        const prev = btn.textContent;
+        btn.textContent = 'Copied!';
+        setTimeout(() => { btn.textContent = prev; }, 1200);
+      } catch (e) {
+        alert('Copy failed: ' + e.message);
+      }
+    }
+
+    async function retryJob(jobId) {
+      const job = jobDataCache.get(jobId);
+      if (!job) return;
+      if (job.status === 'done') {
+        const ok = confirm('Re-queue this job? It will upload again.');
+        if (!ok) return;
+      }
+      const folderId = job.folder_id || '';
+      try {
+        let data;
+        if (job.job_kind === 'path' && job.source_path) {
+          data = await api('/api/upload_path', { path: job.source_path, folder_id: folderId });
+          renderJob(data.job_id, {
+            title: `File: ${job.source_path.split('/').pop()}`,
+            status: 'queued',
+            status_text: 'Queued...',
+            progress: null,
+            folder_name: job.folder_name || '',
+            queued_at: data.queued_at,
+            source_path: job.source_path,
+            folder_id: folderId,
+            job_kind: 'path',
+          });
+        } else if (job.source_url) {
+          data = await api('/api/submit_link', { url: job.source_url, folder_id: folderId });
+          renderJob(data.job_id, {
+            title: `Link: ${job.source_url.substring(0, 80)}`,
+            status: 'queued',
+            status_text: 'Queued...',
+            progress: null,
+            folder_name: job.folder_name || '',
+            queued_at: data.queued_at,
+            source_url: job.source_url,
+            folder_id: folderId,
+            job_kind: 'link',
+          });
+        } else {
+          alert('No source URL or path stored for this job.');
+          return;
+        }
+        await refreshJobs();
+        scheduleJobsRefresh(120);
+      } catch (e) {
+        alert('Retry failed: ' + e.message);
+      }
+    }
+
+    document.getElementById('jobs-area').addEventListener('click', (e) => {
+      const btn = e.target.closest('.job-action-btn');
+      if (!btn) return;
+      const jid = btn.dataset.jid;
+      if (!jid) return;
+      if (btn.dataset.action === 'copy-link') {
+        void copyJobLinks(jid, btn);
+      } else if (btn.dataset.action === 'retry') {
+        void retryJob(jid);
+      }
+    });
 
     async function cancelJob(jobId) {
       try {
@@ -731,7 +871,7 @@
         if (hasActiveJobs) return 1200;
         return 2500;
       } catch (e) {
-        console.error('[gofup] Failed to load jobs:', e);
+        console.error('[apu] Failed to load jobs:', e);
         return 2000;
       } finally {
         jobsPollInFlight = false;
@@ -792,7 +932,7 @@
           statusEl.style.display = 'none';
         }
       } catch (e) {
-        console.error('[gofup] Failed to load upload folders:', e);
+        console.error('[apu] Failed to load upload folders:', e);
         if (statusEl) {
           statusEl.textContent = 'Failed to load folders: ' + e.message;
           statusEl.style.display = 'block';
@@ -831,7 +971,7 @@
         el.textContent = `Folder map mismatch — ${parts.join(' · ')}`;
         el.style.display = 'block';
       } catch (e) {
-        console.error('[gofup] Failed to check folder parity:', e);
+        console.error('[apu] Failed to check folder parity:', e);
       }
     }
 
@@ -972,7 +1112,7 @@
           const blob = new Blob([text], { type: 'application/json' });
           const a = document.createElement('a');
           a.href = URL.createObjectURL(blob);
-          a.download = `gofup-queue-${new Date().toISOString().slice(0, 19).replace(/:/g, '')}.json`;
+          a.download = `apu-queue-${new Date().toISOString().slice(0, 19).replace(/:/g, '')}.json`;
           a.click();
           URL.revokeObjectURL(a.href);
           return;
@@ -1011,14 +1151,14 @@
         providerConfig = cfg;
         const label = cfg.label || 'Upload';
         const active = (cfg.active_providers || []).join(' + ') || label;
-        document.title = `gofup — ${label}`;
+        document.title = `apu — ${label}`;
         document.getElementById('provider-subtitle').innerHTML =
           `Upload to ${escHtml(active)} &mdash; from link or file`;
         document.getElementById('destination-title').textContent = `${label} Destination`;
         document.getElementById('upload-btn').textContent = `Upload to ${label}`;
         updateFolderFormVisibility();
         updateFilesterSyncHint();
-      } catch (e) { console.error('[gofup] Failed to load provider config:', e); }
+      } catch (e) { console.error('[apu] Failed to load provider config:', e); }
     }
 
     document.getElementById('export-queue-btn').addEventListener('click', () => exportQueue(true));

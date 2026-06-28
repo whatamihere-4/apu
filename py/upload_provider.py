@@ -259,27 +259,43 @@ def _upload_filester_parts(
     on_log,
     job_id,
     delete_source: bool,
-) -> list[UploadResult]:
+) -> tuple[list[UploadResult], str | None]:
     from downloader import TransferCancelled
 
     size = os.path.getsize(src)
     results: list[UploadResult] = []
     needs_split = size > FILESTER_MAX_PART_BYTES
     split_mode = resolve_split_mode(size)
+    upload_folder_id = (folder_id or "").strip() or None
 
     if not needs_split:
         raw = filester_upload.upload_file(
             src,
-            folder_id=folder_id,
+            folder_id=upload_folder_id,
             on_progress=on_progress,
             should_cancel=should_cancel,
         )
         results.append(_normalize_filester(raw))
-        return results
+        return results, upload_folder_id
 
     token = job_id or uuid.uuid4().hex[:8]
     out_dir = os.path.join(os.path.dirname(src) or ".", f".split_{token}")
     os.makedirs(out_dir, exist_ok=True)
+    original_basename = os.path.basename(src)
+    stem, _ext = os.path.splitext(original_basename)
+
+    if upload_folder_id:
+        try:
+            subfolder_id = filester_upload.create_folder(upload_folder_id, stem or original_basename)
+            upload_folder_id = subfolder_id
+            if on_log:
+                on_log(
+                    f'[Filester] Created subfolder "{filester_upload.sanitize_folder_name(stem or original_basename)}" '
+                    f"for split parts (parent studio folder)"
+                )
+        except Exception as e:
+            if on_log:
+                on_log(f"[Filester] Subfolder create failed ({e}); uploading parts to studio folder")
     if on_log:
         if FILESTER_SPLIT_MODE == "optimal" and needs_split:
             on_log(
@@ -343,7 +359,7 @@ def _upload_filester_parts(
                 )
             raw = filester_upload.upload_file(
                 part_path,
-                folder_id=folder_id,
+                folder_id=upload_folder_id,
                 on_progress=on_progress,
                 should_cancel=should_cancel,
             )
@@ -375,7 +391,7 @@ def _upload_filester_parts(
     finally:
         shutil.rmtree(out_dir, ignore_errors=True)
 
-    return results
+    return results, upload_folder_id
 
 
 def upload_source(
@@ -386,19 +402,21 @@ def upload_source(
     should_cancel=None,
     on_log=None,
     job_id=None,
-) -> tuple[list[UploadResult], str | None]:
+) -> tuple[list[UploadResult], str | None, str | None]:
     """Upload a file or directory to all enabled/feasible providers.
 
     ``folder_id`` is the GoFile folder. ``filester_folder_id`` is resolved by
     the caller from the GoFile folder display name when not supplied.
 
-    Returns (results, filester_skip_reason). Raises if every planned destination
-    fails. Filester skip is informational when GoFile still runs.
+    Returns (results, filester_skip_reason, filester_folder_id_for_url).
+    ``filester_folder_id_for_url`` may be a split-upload subfolder id. Raises if
+    every planned destination fails. Filester skip is informational when GoFile still runs.
     """
     from downloader import TransferCancelled
 
     all_results: list[UploadResult] = []
     filester_skip_reason: str | None = None
+    filester_url_folder_id: str | None = (filester_folder_id or "").strip() or None
 
     for src in _expand_sources(path):
         if should_cancel and should_cancel():
@@ -434,17 +452,18 @@ def upload_source(
 
         if filester_ran:
             fs_folder = (filester_folder_id or "").strip() or None
-            src_results.extend(
-                _upload_filester_parts(
-                    src,
-                    folder_id=fs_folder,
-                    on_progress=on_progress,
-                    should_cancel=should_cancel,
-                    on_log=on_log,
-                    job_id=job_id,
-                    delete_source=not gofile_ran,
-                )
+            fs_results, effective_fs_folder = _upload_filester_parts(
+                src,
+                folder_id=fs_folder,
+                on_progress=on_progress,
+                should_cancel=should_cancel,
+                on_log=on_log,
+                job_id=job_id,
+                delete_source=not gofile_ran,
             )
+            src_results.extend(fs_results)
+            if effective_fs_folder:
+                filester_url_folder_id = effective_fs_folder
             if gofile_ran and os.path.isfile(src):
                 try:
                     os.remove(src)
@@ -462,4 +481,4 @@ def upload_source(
 
         all_results.extend(src_results)
 
-    return all_results, filester_skip_reason
+    return all_results, filester_skip_reason, filester_url_folder_id

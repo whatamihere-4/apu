@@ -19,7 +19,7 @@ hasher-http turns that into heartbeat ``pct`` / ``eta_sec`` for UIs.
 
 Stdlib only. Mirrors the thumber-http API style for consistency: `filename` is a
 basename only; the file must exist at /downloads/<filename> in this container,
-which is the same shared mount used by gofup and thumber.
+which is the same shared mount used by apu and thumber.
 """
 from __future__ import annotations
 

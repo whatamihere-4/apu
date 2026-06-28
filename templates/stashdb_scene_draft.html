@@ -252,7 +252,7 @@
 <body>
   <div class="page">
     <nav>
-      <a href="/">gofup</a>
+      <a href="/">apu</a>
       <span class="muted">·</span>
       <a href="/bbcode">BBCode</a>
       <span class="muted">·</span>
@@ -324,10 +324,18 @@
         </p>
 
         <div class="field">
-          <label>File in /downloads (basename only — same mount as hasher)</label>
+          <label for="cached-file-select">Cached file (scenes.json)</label>
+          <div class="row">
+            <select id="cached-file-select">
+              <option value="">— none —</option>
+            </select>
+            <button type="button" class="btn secondary" id="cached-file-refresh" title="Reload list from scenes.json">Refresh</button>
+            <button type="button" class="btn secondary" id="cached-file-browse">Browse</button>
+          </div>
+          <p id="cached-file-hint" class="muted small" style="margin:0.35rem 0 0;"></p>
+          <label for="fp-filename" style="margin-top:0.6rem;">File in /downloads (basename only — same mount as hasher)</label>
           <div class="file-row">
             <input type="text" id="fp-filename" placeholder="myvideo.mp4">
-            <button type="button" class="btn secondary" id="fp-browse-btn">Browse</button>
           </div>
           <div id="fp-file-list" class="file-list" style="display:none;"></div>
         </div>
@@ -402,8 +410,12 @@
     const fpFilename = document.getElementById("fp-filename");
     const fpDuration = document.getElementById("fp-duration");
     const fpClearBtn = document.getElementById("fp-clear-btn");
-    const fpBrowseBtn = document.getElementById("fp-browse-btn");
+    const cachedFileSelectEl = document.getElementById("cached-file-select");
+    const cachedFileRefreshBtn = document.getElementById("cached-file-refresh");
+    const cachedFileBrowseBtn = document.getElementById("cached-file-browse");
+    const cachedFileHintEl = document.getElementById("cached-file-hint");
     const fpFileListEl = document.getElementById("fp-file-list");
+    const cachedFileByName = new Map();
 
     const hashFields = {
       OSHASH: document.getElementById("hash-oshash"),
@@ -532,6 +544,53 @@
       setStatus(submitStatus, "", "");
     });
 
+    async function loadCachedFilesList(selectName) {
+      try {
+        const r = await fetch("/api/cached_files");
+        const data = await r.json();
+        if (!r.ok || data.error) throw new Error(data.error || `HTTP ${r.status}`);
+        cachedFileByName.clear();
+        const files = data.files || [];
+        cachedFileSelectEl.innerHTML = '<option value="">— none —</option>';
+        for (const f of files) {
+          cachedFileByName.set(f.filename, f);
+          const opt = document.createElement("option");
+          opt.value = f.filename;
+          let tag = "";
+          if (f.scene_id) tag = " · scene";
+          else if (f.edit_id) tag = " · edit";
+          else if (f.draft_id) tag = " · draft";
+          opt.textContent = f.filename + tag;
+          cachedFileSelectEl.appendChild(opt);
+        }
+        if (selectName) cachedFileSelectEl.value = selectName;
+        cachedFileHintEl.textContent = files.length
+          ? `${files.length} file(s) documented in scenes.json`
+          : "No cached files yet — hash a download first.";
+      } catch (err) {
+        cachedFileHintEl.textContent = "Could not load cache list: " + (err.message || err);
+      }
+    }
+
+    async function applyCachedFileSelection(name) {
+      const fn = (name || "").trim();
+      fpFilename.value = fn;
+      if (fn && cachedFileByName.has(fn)) {
+        cachedFileSelectEl.value = fn;
+      } else if (!fn) {
+        cachedFileSelectEl.value = "";
+      }
+      stickyRemoteBundle = false;
+      clearFingerprints();
+      clearSteps();
+      matchesEl.innerHTML = "";
+      overrideRow.style.display = "none";
+      overrideChk.checked = false;
+      setStatus(autoStatus, "", "");
+      setStatus(submitStatus, "", "");
+      if (fn) await loadCachedHashesForFilename(fn);
+    }
+
     async function loadDownloadsList(dir = "/downloads") {
       try {
         const r = await fetch(`/api/browse?path=${encodeURIComponent(dir)}`);
@@ -552,7 +611,7 @@
             el.addEventListener("click", () => {
               fpFileListEl.querySelectorAll(".file-item").forEach((x) => x.classList.remove("selected"));
               el.classList.add("selected");
-              fpFilename.value = el.dataset.name;
+              void applyCachedFileSelection(el.dataset.name);
             });
           });
         }
@@ -567,12 +626,18 @@
       const i = Math.floor(Math.log(b) / Math.log(1024));
       return (b / Math.pow(1024, i)).toFixed(1) + " " + u[i];
     }
-    fpBrowseBtn.addEventListener("click", () => {
+    cachedFileBrowseBtn.addEventListener("click", () => {
       if (fpFileListEl.style.display === "none" || !fpFileListEl.style.display) {
         loadDownloadsList();
       } else {
         fpFileListEl.style.display = "none";
       }
+    });
+    cachedFileSelectEl.addEventListener("change", () => {
+      void applyCachedFileSelection(cachedFileSelectEl.value);
+    });
+    cachedFileRefreshBtn.addEventListener("click", () => {
+      void loadCachedFilesList(cachedFileSelectEl.value || fpFilename.value.trim());
     });
 
     function gatherDraftPayload() {
@@ -1022,8 +1087,12 @@
     }
 
     fpFilename.addEventListener("change", () => {
-      // Reset the visible step list / matches when the user changes the
-      // filename, then pull whatever the cache has for the new name.
+      const fn = fpFilename.value.trim();
+      if (fn && cachedFileByName.has(fn)) {
+        cachedFileSelectEl.value = fn;
+      } else if (!fn) {
+        cachedFileSelectEl.value = "";
+      }
       stickyRemoteBundle = false;
       clearFingerprints();
       clearSteps();
@@ -1032,7 +1101,7 @@
       overrideChk.checked = false;
       setStatus(autoStatus, "", "");
       setStatus(submitStatus, "", "");
-      loadCachedHashesForFilename(fpFilename.value.trim());
+      loadCachedHashesForFilename(fn);
     });
 
     runAutoBtn.addEventListener("click", () => runPipeline({ allowSubmit: true }));
@@ -1096,8 +1165,11 @@
       }
 
       if (qFilename) {
+        await loadCachedFilesList(qFilename);
         fpFilename.value = qFilename;
         await loadCachedHashesForFilename(qFilename);
+      } else {
+        await loadCachedFilesList("");
       }
 
       if (remoteBundle && qFilename) {

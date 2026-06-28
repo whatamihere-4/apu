@@ -264,7 +264,7 @@ def fetch_oshash_from_url(url: str, timeout: tuple[int, int] | None = None) -> d
     session = requests.Session()
     session.headers.update(
         {
-            "User-Agent": "gofup-oshash-remote/1.0",
+            "User-Agent": "apu-oshash-remote/1.0",
             "Accept": "*/*",
         }
     )

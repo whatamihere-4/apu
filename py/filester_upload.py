@@ -7,6 +7,7 @@ env-var change (UPLOAD_PROVIDER=filester) plus FILESTER_API_KEY.
 from __future__ import annotations
 
 import os
+import re
 import time
 
 import requests
@@ -20,6 +21,8 @@ FILESTER_API_KEY = os.environ.get("FILESTER_API_KEY", "")
 FILESTER_BASE_URL = (os.environ.get("FILESTER_BASE_URL") or "https://u1.filester.me").rstrip("/")
 # Public download page host (the API base is an upload node, e.g. u1.filester.me).
 FILESTER_SITE_URL = (os.environ.get("FILESTER_SITE_URL") or "https://filester.me").rstrip("/")
+
+_FOLDER_NAME_MAX = 100
 
 
 def _auth_headers():
@@ -42,6 +45,17 @@ def _flatten_folder_rows(rows: list, out: dict[str, str]) -> None:
             children = item.get(child_key)
             if isinstance(children, list) and children:
                 _flatten_folder_rows(children, out)
+
+
+def sanitize_folder_name(name: str, *, max_len: int = _FOLDER_NAME_MAX) -> str:
+    """Filester folder name: strip unsafe chars, collapse whitespace, cap length."""
+    s = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", (name or "").strip())
+    s = re.sub(r"\s+", " ", s).strip()
+    if not s:
+        s = "upload"
+    if len(s) > max_len:
+        s = s[:max_len].rstrip()
+    return s or "upload"
 
 
 def fetch_folder_map_from_api() -> dict[str, str]:
@@ -67,16 +81,36 @@ def get_root_folder_id():
     return ""
 
 
-def create_folder(parent_id, name):
-    """Create a top-level folder (Filester API does not nest via parent_id today)."""
+def create_folder(parent_id, name, *, name_suffix: str | None = None):
+    """Create a folder, optionally nested under ``parent_id`` (Filester ``parent`` field)."""
+    base = sanitize_folder_name(name)
+    if name_suffix:
+        suffix = str(name_suffix).strip()
+        max_base = _FOLDER_NAME_MAX - len(suffix) - 1
+        if max_base < 1:
+            folder_name = suffix[:_FOLDER_NAME_MAX]
+        else:
+            folder_name = f"{base[:max_base].rstrip()}-{suffix}"
+    else:
+        folder_name = base
+
+    payload: dict = {"name": folder_name, "public": 1}
+    pid = (parent_id or "").strip()
+    if pid:
+        payload["parent"] = pid
+
     r = requests.post(
         f"{FILESTER_BASE_URL}/api/v1/folder",
         headers=_auth_headers(),
-        json={"name": name, "public": 1},
+        json=payload,
+        timeout=60,
     )
     r.raise_for_status()
     data = r.json()
     if not data.get("success"):
+        msg = str(data.get("message") or data)
+        if name_suffix is None and pid and "exist" in msg.lower():
+            return create_folder(parent_id, name, name_suffix="2")
         raise RuntimeError(f"Failed to create folder: {data}")
     identifier = (data.get("data") or {}).get("identifier")
     if not identifier:

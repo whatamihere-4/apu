@@ -1,9 +1,9 @@
 services:
-  gofup:
+  apu:
     build:
       context: .
-      dockerfile: docker/Dockerfile.gofup
-    container_name: gofup
+      dockerfile: docker/Dockerfile.apu
+    container_name: apu
     restart: unless-stopped
     dns:
       - 1.1.1.1
@@ -103,7 +103,7 @@ services:
 
   # Splits oversized uploads (e.g. for Filester's 10 GB cap) via ffmpeg stream
   # copy. Isolated so CPU/memory can be capped; only used when SPLITTER_HTTP_URL
-  # points here. gofup falls back to in-process splitting when that is unset.
+  # points here. apu falls back to in-process splitting when that is unset.
   splitter-http:
     build:
       context: .

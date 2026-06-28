@@ -43,6 +43,7 @@ from upload_provider import (
 from downloader import download_file, TransferCancelled
 from filester_upload import fetch_folder_map_from_api
 from oshash_remote import fetch_oshash_from_url
+import goonbox_upload
 from queue_persist import track_add, track_remove
 from queue_api import register_queue_routes
 
@@ -97,7 +98,7 @@ def _downloads_key_for_sidecars(full_path: str) -> str:
 
 # Same host path as thumber's THUMBER_THUMBS → /thumbs (see docker-compose bind).
 THUMBS_DIR = os.path.realpath(
-    (os.environ.get("GOFUP_THUMBS_DIR") or "/thumbs").rstrip("/") or "/thumbs"
+    (os.environ.get("THUMBS_DIR") or "/thumbs").rstrip("/") or "/thumbs"
 )
 
 
@@ -111,7 +112,7 @@ def _resolve_cache_dir(path: str) -> str:
 
 HASHES_DIR = os.path.realpath(
     _resolve_cache_dir(
-        (os.environ.get("GOFUP_CACHE_DIR") or os.path.join(APP_DIR, "cache")).rstrip("/")
+        (os.environ.get("CACHE_DIR") or os.path.join(APP_DIR, "cache")).rstrip("/")
         or os.path.join(APP_DIR, "cache")
     )
 )
@@ -171,7 +172,7 @@ HASHER_HTTP_TIMEOUT = _env_int(
     "HASHER_HTTP_TIMEOUT_SEC",
     _env_int("PHASHER_HTTP_TIMEOUT_SEC", 1800),
 )
-# Master switch for hasher-http usage in gofup. When 0, HASHER_*_ENABLED for individual algos are ignored.
+# Master switch for hasher-http usage in apu. When 0, HASHER_*_ENABLED for individual algos are ignored.
 HASHER_ENABLED = _env_yes("HASHER_ENABLED", default="1")
 # Per-algorithm (only if HASHER_ENABLED and HASHER_HTTP_URL are both on).
 HASHER_OSHASH_ENABLED = _env_yes("HASHER_OSHASH_ENABLED", default="1")
@@ -195,41 +196,13 @@ FILESTER_FOLDER_SYNC_INTERVAL_SEC = max(
 )
 
 
-def _chevereto_to_album_token(idish: str) -> str:
-    """Value for Chevereto upload ?toAlbum= (must match decodeID / getIdFromURLComponent)."""
-    s = (idish or "").strip().strip("/")
-    if not s:
-        return ""
-    seg = s.split("/")[-1]
-    bits = seg.split(".")
-    if len(bits) >= 2:
-        return bits[1] if bits[1] else bits[0]
-    return bits[0]
-
-
-def _normalized_jpg6_to_album(raw: str) -> str:
-    """Chevereto 3 ?toAlbum= token from JPG6_TO_ALBUM (bare id, user.encid, or full album URL).
-
-    Public album URLs look like /a/user.encodedId; route.upload uses decodeID(toAlbum) only, not
-    getIdFromURLComponent — so user.encodedId must be passed as encodedId alone.
-    """
-    s = (raw or "").strip()
-    if not s:
-        return ""
-    if "://" in s:
-        p = urllib.parse.urlparse(s)
-        s = (p.path or "").strip("/")
-    parts = [x for x in s.split("/") if x]
-    if not parts:
-        return ""
-    if parts[0] in ("a", "album") and len(parts) >= 2:
-        path_rest = "/".join(parts[1:])
-    else:
-        path_rest = "/".join(parts)
-    return _chevereto_to_album_token(path_rest)
-
-
-JPG6_TO_ALBUM = _normalized_jpg6_to_album(os.environ.get("JPG6_TO_ALBUM", ""))
+GOONBOX_BASE_URL = (os.environ.get("GOONBOX_BASE_URL") or "https://goonbox.cr").rstrip("/")
+GOONBOX_AUTO_UPLOAD = _env_yes("GOONBOX_AUTO_UPLOAD", default="0")
+SLR_GIF_FPS = _env_int("SLR_GIF_FPS", 12)
+SLR_GIF_WIDTH = _env_int("SLR_GIF_WIDTH", 480)
+SLR_GIF_MAX_DURATION = _env_int("SLR_GIF_MAX_DURATION", 15)
+SLR_GIF_MAX_BYTES = _env_int("SLR_GIF_MAX_BYTES", 26_214_400)
+JOB_LINKS_FILENAME_ONLY = _env_yes("JOB_LINKS_FILENAME_ONLY", default="0")
 HASHER_ALGORITHMS = ("OSHASH", "MD5", "PHASH")
 
 
@@ -1362,7 +1335,7 @@ def _thumber_http_headers_for_post(stream=False):
 def _thumber_http_stream_url():
     """
     Resolve POST /v1/thumbs/stream URL from THUMBER_HTTP_URL (base or /v1/thumbs).
-    gofup uses SSE streaming only (no sync /v1/thumbs client).
+    apu uses SSE streaming only (no sync /v1/thumbs client).
     """
     u = THUMBER_HTTP_URL.strip().rstrip("/")
     if not u:
@@ -1776,7 +1749,9 @@ def bbcode_page():
         filester_enabled=FILESTER_ENABLED,
         filester_split_mode=FILESTER_SPLIT_MODE,
         stashdb_scenes_base=STASHDB_SCENES_BASE,
-        jpg6_to_album=JPG6_TO_ALBUM,
+        goonbox_base_url=GOONBOX_BASE_URL,
+        goonbox_configured=goonbox_upload.configured(),
+        goonbox_auto_upload=GOONBOX_AUTO_UPLOAD,
     )
 
 
@@ -3570,7 +3545,7 @@ def _thumb_sheet_path(video_key: str) -> str | None:
 # ── StashDB endpoints ────────────────────────────────────────────────
 
 def _hash_via_sidecar(name, algorithm, on_hasher_event=None):
-    """Shared helper for the gofup-side hash endpoints. Returns the hasher-http
+    """Shared helper for the apu-side hash endpoints. Returns the hasher-http
     body or raises the same exceptions _hasher_call does."""
     if not _hasher_service_active():
         raise RuntimeError(
@@ -5391,7 +5366,7 @@ def api_thumb_sheet():
         return jsonify({
             "error": "thumbnail_sheet_not_found",
             "detail": "Expected <stem>_thumbs.png under the thumber output directory. "
-            "Mount the same host folder as thumber's THUMBER_THUMBS at GOFUP_THUMBS_DIR=/thumbs.",
+            "Mount the same host folder as thumber's THUMBER_THUMBS at THUMBS_DIR=/thumbs.",
         }), 404
     attach = (request.args.get("attachment") or "").strip().lower() in (
         "1", "true", "yes", "download",
@@ -5449,54 +5424,255 @@ def api_stashdb_scene_image_png():
         return jsonify({"error": "index must be an integer"}), 400
 
     try:
-        raw = _stashdb_scene_full_query(scene_id)
-    except Exception as e:  # noqa: BLE001
-        return jsonify({"error": f"Failed to fetch from StashDB: {e}"}), 502
-    if not raw:
-        return jsonify({"error": "Scene not found on StashDB"}), 404
-    # Use full fragment (incl. images) and pick by largest dimensions.
-    images = []
-    for img in raw.get("images") or []:
-        if isinstance(img, dict) and img.get("url"):
-            images.append(img)
-    images.sort(key=lambda i: (i.get("width") or 0) * (i.get("height") or 0), reverse=True)
-    if not images:
-        return jsonify({"error": "Scene has no images on StashDB"}), 404
-    if index < 0 or index >= len(images):
-        return jsonify({"error": f"index out of range (0..{len(images)-1})"}), 400
+        png_bytes = _stashdb_scene_cover_png_bytes(scene_id, index)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 502
 
-    src_url = images[index]["url"]
-    try:
-        r = requests.get(src_url, timeout=30, stream=False)
-        r.raise_for_status()
-    except requests.RequestException as e:
-        return jsonify({"error": f"Failed to fetch image from StashDB: {e}"}), 502
-
-    try:
-        from PIL import Image  # imported lazily so app starts even if Pillow is absent
-    except ImportError:
-        return jsonify({"error": "Pillow is not installed; rebuild the gofup image"}), 500
-
-    try:
-        img = Image.open(BytesIO(r.content))
-        # PNG doesn't support all colour modes (e.g. P with alpha can be lossy);
-        # convert to RGBA when there's an alpha channel, else RGB.
-        if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
-            out_img = img.convert("RGBA")
-        else:
-            out_img = img.convert("RGB")
-        out = BytesIO()
-        out_img.save(out, format="PNG", optimize=True)
-        out.seek(0)
-    except Exception as e:  # noqa: BLE001
-        return jsonify({"error": f"Failed to convert image: {e}"}), 500
-
+    out = BytesIO(png_bytes)
+    out.seek(0)
     return send_file(
         out,
         mimetype="image/png",
         as_attachment=True,
         download_name=f"{scene_id}_{index}.png",
     )
+
+
+def _stashdb_scene_images_sorted(scene_id: str) -> list[dict]:
+    raw = _stashdb_scene_full_query(scene_id)
+    if not raw:
+        raise ValueError("Scene not found on StashDB")
+    images = []
+    for img in raw.get("images") or []:
+        if isinstance(img, dict) and img.get("url"):
+            images.append(img)
+    images.sort(key=lambda i: (i.get("width") or 0) * (i.get("height") or 0), reverse=True)
+    if not images:
+        raise ValueError("Scene has no images on StashDB")
+    return images
+
+
+def _stashdb_scene_cover_png_bytes(scene_id: str, index: int = 0) -> bytes:
+    images = _stashdb_scene_images_sorted(scene_id)
+    if index < 0 or index >= len(images):
+        raise ValueError(f"index out of range (0..{len(images)-1})")
+    src_url = images[index]["url"]
+    try:
+        r = requests.get(src_url, timeout=30, stream=False)
+        r.raise_for_status()
+    except requests.RequestException as e:
+        raise RuntimeError(f"Failed to fetch image from StashDB: {e}") from e
+
+    try:
+        from PIL import Image
+    except ImportError as e:
+        raise RuntimeError("Pillow is not installed; rebuild the apu image") from e
+
+    try:
+        img = Image.open(BytesIO(r.content))
+        if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
+            out_img = img.convert("RGBA")
+        else:
+            out_img = img.convert("RGB")
+        out = BytesIO()
+        out_img.save(out, format="PNG", optimize=True)
+        return out.getvalue()
+    except Exception as e:
+        raise RuntimeError(f"Failed to convert image: {e}") from e
+
+
+def _thumb_sheet_png_bytes(video_key: str) -> bytes | None:
+    path = _thumb_sheet_path(video_key)
+    if not path:
+        return None
+    with open(path, "rb") as fp:
+        return fp.read()
+
+
+def _slr_preview_gif_bytes(code: str) -> bytes:
+    if not re.fullmatch(r"\d{4,10}", code):
+        raise ValueError("Missing or invalid SLR scene code (4-10 digits)")
+    ffmpeg_bin = _which_ffmpeg()
+    if not ffmpeg_bin:
+        raise RuntimeError("ffmpeg is not installed on the server")
+
+    mp4_url = _slr_preview_mp4_url(code)
+    max_mp4 = _env_int("SLR_PREVIEW_MAX_MP4_BYTES", 30_000_000)
+    try:
+        with requests.get(mp4_url, stream=True, timeout=60) as r:
+            r.raise_for_status()
+            buf = BytesIO()
+            n = 0
+            for chunk in r.iter_content(chunk_size=65536):
+                if not chunk:
+                    continue
+                n += len(chunk)
+                if n > max_mp4:
+                    raise ValueError(f"Preview MP4 exceeds {max_mp4} bytes cap")
+                buf.write(chunk)
+            mp4_data = buf.getvalue()
+    except requests.RequestException as e:
+        raise RuntimeError(f"Could not download SLR preview: {e}") from e
+
+    if len(mp4_data) < 256:
+        raise RuntimeError("Preview download was empty or too small")
+
+    fps = max(1, min(SLR_GIF_FPS, 60))
+    width = max(120, min(SLR_GIF_WIDTH, 1920))
+    duration = max(1, min(SLR_GIF_MAX_DURATION, 60))
+
+    tmp_mp4 = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
+    tmp_gif = tempfile.NamedTemporaryFile(suffix=".gif", delete=False)
+    mp4_path = tmp_mp4.name
+    gif_path = tmp_gif.name
+    tmp_mp4.close()
+    tmp_gif.close()
+    try:
+        with open(mp4_path, "wb") as f:
+            f.write(mp4_data)
+        vf = (
+            f"fps={fps},scale={width}:-1:flags=lanczos,"
+            "split[s0][s1];[s0]palettegen=max_colors=128[p];"
+            "[s1][p]paletteuse=dither=bayer:bayer_scale=3"
+        )
+        proc = subprocess.run(
+            [
+                ffmpeg_bin,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                mp4_path,
+                "-t",
+                str(duration),
+                "-vf",
+                vf,
+                "-loop",
+                "0",
+                gif_path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        if proc.returncode != 0:
+            tail = ((proc.stderr or "") + (proc.stdout or "")).strip()[-800:]
+            raise RuntimeError(f"ffmpeg failed ({proc.returncode}): {tail or 'no stderr'}")
+        with open(gif_path, "rb") as gf:
+            gif_bytes = gf.read()
+    finally:
+        for pth in (mp4_path, gif_path):
+            try:
+                os.unlink(pth)
+            except OSError:
+                pass
+
+    if not gif_bytes or len(gif_bytes) < 32:
+        raise RuntimeError("ffmpeg produced an empty GIF")
+    if len(gif_bytes) > SLR_GIF_MAX_BYTES:
+        raise RuntimeError(
+            f"GIF is {len(gif_bytes):,} bytes (limit {SLR_GIF_MAX_BYTES:,}). "
+            f"Lower SLR_GIF_WIDTH / SLR_GIF_FPS / SLR_GIF_MAX_DURATION."
+        )
+    return gif_bytes
+
+
+@app.route("/api/bbcode_goonbox_upload", methods=["POST"])
+def api_bbcode_goonbox_upload():
+    """Upload cover + thumb sheet + SLR GIF to GoonBox; return concatenated BBCode.
+
+    Body JSON:
+      scene_id (required)
+      filename (optional — thumb sheet basename under /downloads)
+      image_index (optional, default 0)
+      slr_code (optional — extracted from scene URLs when omitted)
+      include_thumbs (optional, default true)
+      include_gif (optional, default true when slr_code resolvable)
+    """
+    if not goonbox_upload.configured():
+        return jsonify({
+            "error": "GoonBox auth not configured — set GOONBOX_AUTH_TOKEN or GOONBOX_SESSION + GOONBOX_XSRF_TOKEN",
+        }), 400
+    data = request.get_json(silent=True) or {}
+    scene_id = (data.get("scene_id") or "").strip()
+    if not scene_id:
+        return jsonify({"error": "scene_id is required"}), 400
+    filename = (data.get("filename") or "").strip()
+    try:
+        image_index = int(data.get("image_index", 0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "image_index must be an integer"}), 400
+    slr_code = (data.get("slr_code") or "").strip()
+    include_thumbs = data.get("include_thumbs", True) is not False
+    include_gif = data.get("include_gif", True) is not False
+
+    parts: list[dict] = []
+    skipped: list[dict] = []
+    bbcode_chunks: list[str] = []
+
+    try:
+        cover_bytes = _stashdb_scene_cover_png_bytes(scene_id, image_index)
+        cover_name = f"stashdb_{scene_id}_{image_index}.png"
+        cover_resp = goonbox_upload.upload_bytes(cover_bytes, cover_name, content_type="image/png")
+        cover_bb = cover_resp["bbcode"]
+        parts.append({"kind": "cover", "bbcode": cover_bb, "filename": cover_name})
+        bbcode_chunks.append(cover_bb)
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": f"Cover upload failed: {e}"}), 502
+
+    if include_thumbs and filename:
+        try:
+            thumb_bytes = _thumb_sheet_png_bytes(filename)
+            if thumb_bytes:
+                thumb_name = _thumb_sheet_basename(filename)
+                thumb_resp = goonbox_upload.upload_bytes(
+                    thumb_bytes, os.path.basename(thumb_name), content_type="image/png"
+                )
+                thumb_bb = thumb_resp["bbcode"]
+                parts.append({"kind": "thumbs", "bbcode": thumb_bb, "filename": thumb_name})
+                bbcode_chunks.append(thumb_bb)
+            else:
+                skipped.append({"kind": "thumbs", "reason": "thumbnail_sheet_not_found"})
+        except Exception as e:  # noqa: BLE001
+            skipped.append({"kind": "thumbs", "reason": str(e)})
+    elif include_thumbs and not filename:
+        skipped.append({"kind": "thumbs", "reason": "no_filename_for_thumb_sheet"})
+
+    if include_gif:
+        if not slr_code:
+            try:
+                raw = _stashdb_scene_full_query(scene_id)
+                for url_row in (raw or {}).get("urls") or []:
+                    u = (url_row.get("url") if isinstance(url_row, dict) else url_row) or ""
+                    slr_code = _extract_slr_scene_code(str(u)) or ""
+                    if slr_code:
+                        break
+            except Exception:  # noqa: BLE001
+                slr_code = ""
+        if slr_code:
+            try:
+                gif_bytes = _slr_preview_gif_bytes(slr_code)
+                gif_name = f"slr_preview_{slr_code}.gif"
+                gif_resp = goonbox_upload.upload_bytes(gif_bytes, gif_name, content_type="image/gif")
+                gif_bb = gif_resp["bbcode"]
+                parts.append({"kind": "gif", "bbcode": gif_bb, "filename": gif_name})
+                bbcode_chunks.append(gif_bb)
+            except Exception as e:  # noqa: BLE001
+                skipped.append({"kind": "gif", "reason": str(e)})
+        else:
+            skipped.append({"kind": "gif", "reason": "no_slr_scene_code"})
+
+    image_bbcode = "".join(bbcode_chunks)
+    return jsonify({
+        "ok": True,
+        "image_bbcode": image_bbcode,
+        "parts": parts,
+        "skipped": skipped,
+    })
 
 
 def _extract_slr_scene_code(url: str) -> str | None:
@@ -5549,91 +5725,13 @@ def api_slr_preview_gif():
         code = _extract_slr_scene_code(scene_url) or ""
     if not re.fullmatch(r"\d{4,10}", code):
         return jsonify({"error": "Missing or invalid SLR scene code (4-10 digits)"}), 400
-    ffmpeg_bin = _which_ffmpeg()
-    if not ffmpeg_bin:
-        return jsonify({"error": "ffmpeg is not installed on the server"}), 501
-
-    mp4_url = _slr_preview_mp4_url(code)
-    max_bytes = _env_int("SLR_PREVIEW_MAX_MP4_BYTES", 30_000_000)
     try:
-        with requests.get(mp4_url, stream=True, timeout=60) as r:
-            r.raise_for_status()
-            ct = (r.headers.get("Content-Type") or "").lower()
-            if "mp4" not in ct and "video" not in ct and "octet-stream" not in ct:
-                # CDN may omit type; allow empty / generic.
-                pass
-            buf = BytesIO()
-            n = 0
-            for chunk in r.iter_content(chunk_size=65536):
-                if not chunk:
-                    continue
-                n += len(chunk)
-                if n > max_bytes:
-                    return jsonify({"error": f"Preview MP4 exceeds {max_bytes} bytes cap"}), 413
-                buf.write(chunk)
-            mp4_data = buf.getvalue()
-    except requests.RequestException as e:
-        return jsonify({"error": f"Could not download SLR preview: {e}"}), 502
+        gif_bytes = _slr_preview_gif_bytes(code)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 502
 
-    if len(mp4_data) < 256:
-        return jsonify({"error": "Preview download was empty or too small"}), 502
-
-    tmp_mp4 = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
-    tmp_gif = tempfile.NamedTemporaryFile(suffix=".gif", delete=False)
-    mp4_path = tmp_mp4.name
-    gif_path = tmp_gif.name
-    tmp_mp4.close()
-    tmp_gif.close()
-    err: tuple | None = None
-    gif_bytes: bytes | None = None
-    try:
-        with open(mp4_path, "wb") as f:
-            f.write(mp4_data)
-        proc = subprocess.run(
-            [
-                ffmpeg_bin,
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-y",
-                "-i",
-                mp4_path,
-                "-t",
-                "15",
-                "-vf",
-                (
-                    "fps=12,scale=480:-1:flags=lanczos,"
-                    "split[s0][s1];[s0]palettegen=max_colors=128[p];"
-                    "[s1][p]paletteuse=dither=bayer:bayer_scale=3"
-                ),
-                "-loop",
-                "0",
-                gif_path,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=120,
-            check=False,
-        )
-        if proc.returncode != 0:
-            tail = ((proc.stderr or "") + (proc.stdout or "")).strip()[-800:]
-            err = (jsonify({"error": f"ffmpeg failed ({proc.returncode}): {tail or 'no stderr'}"}), 500)
-        else:
-            try:
-                with open(gif_path, "rb") as gf:
-                    gif_bytes = gf.read()
-            except OSError as e:
-                err = (jsonify({"error": f"Could not read GIF: {e}"}), 500)
-            if err is None and (not gif_bytes or len(gif_bytes) < 32):
-                err = (jsonify({"error": "ffmpeg produced an empty GIF"}), 500)
-    finally:
-        for pth in (mp4_path, gif_path):
-            try:
-                os.unlink(pth)
-            except OSError:
-                pass
-    if err is not None:
-        return err
     out_gif = BytesIO(gif_bytes)
     out_gif.seek(0)
     return send_file(
@@ -5698,6 +5796,7 @@ def api_upload_config():
         "filester_folder_sync_enabled": FILESTER_FOLDER_SYNC_ENABLED,
         "filester_folder_sync_interval_sec": FILESTER_FOLDER_SYNC_INTERVAL_SEC,
         "filester_folder_sync": dict(_filester_sync_state),
+        "job_links_filename_only": JOB_LINKS_FILENAME_ONLY,
     })
 
 
@@ -6074,7 +6173,7 @@ def _start_link_job(url, folder_id=None):
             filester_folder_id = _resolve_filester_folder_id(folder_id)
             jobs[job_id]["filester_folder_id"] = filester_folder_id or ""
             try:
-                results, filester_skip = upload_source(
+                results, filester_skip, fs_url_folder = upload_source(
                     downloaded_path,
                     folder_id=folder_id,
                     filester_folder_id=filester_folder_id,
@@ -6095,7 +6194,7 @@ def _start_link_job(url, folder_id=None):
                 job_id,
                 results,
                 filester_skip_reason=filester_skip,
-                filester_folder_id=filester_folder_id,
+                filester_folder_id=fs_url_folder or filester_folder_id,
             )
             if is_video:
                 _join_phash_followup_thread(job_id, timeout=None)
@@ -6216,7 +6315,7 @@ def _start_path_job(path, folder_id=None):
             filester_folder_id = _resolve_filester_folder_id(folder_id)
             jobs[job_id]["filester_folder_id"] = filester_folder_id or ""
             try:
-                results, filester_skip = upload_source(
+                results, filester_skip, fs_url_folder = upload_source(
                     path,
                     folder_id=folder_id,
                     filester_folder_id=filester_folder_id,
@@ -6234,7 +6333,7 @@ def _start_path_job(path, folder_id=None):
                     job_id,
                     results,
                     filester_skip_reason=filester_skip,
-                    filester_folder_id=filester_folder_id,
+                    filester_folder_id=fs_url_folder or filester_folder_id,
                 )
         except Exception as e:
             if not _is_cancelled(job_id):
@@ -6289,17 +6388,17 @@ _start_filester_folder_sync_background()
 if __name__ == "__main__":
     os.makedirs(DOWNLOADS_DIR, exist_ok=True)
     folders = _load_gofile_folders()
-    print(f"[gofup] Loaded {len(folders)} saved GoFile folder(s) from {GOFILE_FOLDERS_FILE}", flush=True)
+    print(f"[apu] Loaded {len(folders)} saved GoFile folder(s) from {GOFILE_FOLDERS_FILE}", flush=True)
     print(
-        f"[gofup] Upload: {PROVIDER_LABEL} "
+        f"[apu] Upload: {PROVIDER_LABEL} "
         f"(gofile={GOFILE_ENABLED}, filester={FILESTER_ENABLED})",
         flush=True,
     )
-    if _env_yes("GOFUP_RESTORE_QUEUE", default="1"):
+    if _env_yes("RESTORE_QUEUE", default="1"):
         try:
             restored = _restore_pending_queue()
-            print(f"[gofup] Restored {restored} pending job(s) from disk", flush=True)
+            print(f"[apu] Restored {restored} pending job(s) from disk", flush=True)
         except Exception as e:
-            print(f"[gofup] Queue restore failed: {e}", flush=True)
-    print("[gofup] Starting on http://0.0.0.0:5000", flush=True)
+            print(f"[apu] Queue restore failed: {e}", flush=True)
+    print("[apu] Starting on http://0.0.0.0:5000", flush=True)
     app.run(host="0.0.0.0", port=5000, debug=False)

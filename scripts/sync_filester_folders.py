@@ -56,7 +56,7 @@ def main() -> int:
 
     _load_dotenv(ENV_PATH)
     os.environ.setdefault(
-        "GOFUP_CACHE_DIR",
+        "CACHE_DIR",
         os.path.join(APP_DIR, "cache"),
     )
 
