@@ -416,11 +416,16 @@ def upload_source(
     should_cancel=None,
     on_log=None,
     job_id=None,
+    delete_source_after_upload: bool = False,
 ) -> tuple[list[UploadResult], str | None, str | None]:
     """Upload a file or directory to all enabled/feasible providers.
 
     ``folder_id`` is the GoFile folder. ``filester_folder_id`` is resolved by
     the caller from the GoFile folder display name when not supplied.
+
+    When ``delete_source_after_upload`` is True, local source files are removed
+    after a successful upload (e.g. temp downloads from link jobs). Path/file-picker
+    uploads should leave this False so the user's original file stays on disk.
 
     Returns (results, filester_skip_reason, filester_folder_id_for_url).
     ``filester_folder_id_for_url`` may be a split-upload subfolder id. Raises if
@@ -473,12 +478,12 @@ def upload_source(
                 should_cancel=should_cancel,
                 on_log=on_log,
                 job_id=job_id,
-                delete_source=not gofile_ran,
+                delete_source=delete_source_after_upload and not gofile_ran,
             )
             src_results.extend(fs_results)
             if effective_fs_folder:
                 filester_url_folder_id = effective_fs_folder
-            if gofile_ran and os.path.isfile(src):
+            if delete_source_after_upload and gofile_ran and os.path.isfile(src):
                 try:
                     os.remove(src)
                 except OSError:

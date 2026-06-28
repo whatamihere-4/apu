@@ -6215,6 +6215,7 @@ def _start_link_job(url, folder_id=None):
                     should_cancel=lambda: _is_cancelled(job_id),
                     on_log=lambda ln: _append_job_log(job_id, ln),
                     job_id=job_id,
+                    delete_source_after_upload=True,
                 )
             finally:
                 if is_video:
