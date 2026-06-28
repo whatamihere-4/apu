@@ -3,7 +3,13 @@
 No re-encoding ever happens: every part is produced with ``-c copy`` and keeps
 the source container/codecs. Parts are named ``<name>.PART1.<ext>``,
 ``<name>.PART2.<ext>`` ... and each is independently playable
-(``-reset_timestamps 1``). They concatenate back losslessly with:
+(``-reset_timestamps 1``). Rejoin losslessly with the **concat demuxer** and
+stream copy (not the concat filter — that re-encodes):
+
+    # list.txt — one ``file 'path'`` line per part, in order
+    ffmpeg -f concat -safe 0 -i list.txt -c copy movie.mkv
+
+Or the concat protocol shortcut when all parts share one directory:
 
     ffmpeg -f concat -safe 0 -i "concat:movie.PART1.mkv|movie.PART2.mkv" -c copy movie.mkv
 
@@ -14,6 +20,8 @@ from __future__ import annotations
 import math
 import os
 import subprocess
+import threading
+import time
 
 FFMPEG_BIN = os.environ.get("FFMPEG_BIN", "ffmpeg")
 FFPROBE_BIN = os.environ.get("FFPROBE_BIN", "ffprobe")
@@ -72,7 +80,103 @@ def _copy_stream_maps() -> list[str]:
     return ["-map", "0:v", "-map", "0:a?"]
 
 
-def _run_segment(path, output_dir, stem, ext, segment_time, timeout, on_log):
+def _ffmpeg_line_for_log(line: str) -> str | None:
+    """Pick stderr lines worth surfacing in the job log (drop libav banner noise)."""
+    s = line.strip()
+    if not s:
+        return None
+    lower = s.lower()
+    if lower.startswith("ffmpeg version") or lower.startswith("configuration:"):
+        return None
+    if "libav" in lower and ("copyright" in lower or "built with" in lower):
+        return None
+    if "input #" in lower and "from '" in lower:
+        return None
+    if "output #" in lower and "to '" in lower:
+        return s
+    if "opening '" in lower or "stream mapping" in lower:
+        return s
+    if "error" in lower or "failed" in lower or "warning" in lower:
+        return s
+    if "time=" in s and ("frame=" in s or "size=" in s or "bitrate=" in s):
+        return s
+    if s.startswith("frame="):
+        return s
+    return None
+
+
+def _run_ffmpeg_logged(
+    cmd: list[str],
+    *,
+    timeout: int,
+    on_log=None,
+    should_cancel=None,
+) -> None:
+    """Run ffmpeg, streaming filtered stderr lines to ``on_log``."""
+    if "-stats_period" not in cmd:
+        # Periodic progress on stderr when not attached to a TTY.
+        insert_at = 1 if len(cmd) > 1 and cmd[1] == "-hide_banner" else 1
+        cmd = cmd[:insert_at] + ["-stats_period", "1"] + cmd[insert_at:]
+
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+    stderr_buf: list[str] = []
+    last_progress = [0.0]
+
+    def _reader() -> None:
+        assert proc.stderr is not None
+        for line in proc.stderr:
+            stderr_buf.append(line)
+            if not on_log:
+                continue
+            picked = _ffmpeg_line_for_log(line)
+            if not picked:
+                continue
+            now = time.time()
+            if "time=" in picked and (now - last_progress[0]) < 1.0:
+                continue
+            if "time=" in picked:
+                last_progress[0] = now
+            on_log(f"[ffmpeg] {picked}")
+
+    reader = threading.Thread(target=_reader, daemon=True)
+    reader.start()
+
+    deadline = time.time() + timeout
+    rc = None
+    try:
+        while True:
+            if should_cancel and should_cancel():
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+                from downloader import TransferCancelled
+                raise TransferCancelled("Upload cancelled")
+            rc = proc.poll()
+            if rc is not None:
+                break
+            if time.time() > deadline:
+                proc.kill()
+                proc.wait()
+                raise SplitError(f"ffmpeg timed out after {timeout}s")
+            time.sleep(0.25)
+    finally:
+        reader.join(timeout=3)
+
+    if rc != 0:
+        tail = "".join(stderr_buf)[-600:]
+        raise SplitError(f"ffmpeg failed (exit {rc}): {tail}")
+
+
+def _run_segment(path, output_dir, stem, ext, segment_time, timeout, on_log, should_cancel=None):
     pattern = os.path.join(output_dir, f"{stem}.PART%d{ext}")
     cmd = [
         FFMPEG_BIN, "-hide_banner", "-y",
@@ -87,10 +191,9 @@ def _run_segment(path, output_dir, stem, ext, segment_time, timeout, on_log):
     ]
     if on_log:
         on_log(f"ffmpeg segment (stream copy), ~{segment_time}s per part")
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    if proc.returncode != 0:
-        tail = (proc.stderr or "")[-600:]
-        raise SplitError(f"ffmpeg split failed (exit {proc.returncode}): {tail}")
+    _run_ffmpeg_logged(
+        cmd, timeout=timeout, on_log=on_log, should_cancel=should_cancel,
+    )
 
 
 def split_file(
@@ -130,7 +233,10 @@ def split_file(
 
         target_bytes = int(max_bytes * factor)
         segment_time = max(1, int(target_bytes / bytes_per_sec))
-        _run_segment(path, output_dir, stem, ext, segment_time, ffmpeg_timeout, on_log)
+        _run_segment(
+            path, output_dir, stem, ext, segment_time, ffmpeg_timeout, on_log,
+            should_cancel=should_cancel,
+        )
 
         parts = _part_paths(output_dir, stem, ext)
         if not parts:
@@ -218,6 +324,7 @@ def _extract_single_segment(
     *,
     timeout: int,
     on_log=None,
+    should_cancel=None,
 ) -> None:
     """Extract one stream-copy segment (playable output with normal extension)."""
     cmd = [
@@ -235,10 +342,9 @@ def _extract_single_segment(
             f"ffmpeg slice {os.path.basename(output_path)} "
             f"@ {start_sec:.1f}s for {duration_sec:.1f}s"
         )
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    if proc.returncode != 0:
-        tail = (proc.stderr or "")[-600:]
-        raise SplitError(f"ffmpeg slice failed (exit {proc.returncode}): {tail}")
+    _run_ffmpeg_logged(
+        cmd, timeout=timeout, on_log=on_log, should_cancel=should_cancel,
+    )
 
 
 def iter_upload_parts_sliced(
@@ -303,6 +409,7 @@ def iter_upload_parts_sliced(
             trial_segment_time,
             timeout=ffmpeg_timeout,
             on_log=on_log,
+            should_cancel=should_cancel,
         )
         probe_size = os.path.getsize(probe_path)
         try:
@@ -353,6 +460,7 @@ def iter_upload_parts_sliced(
             seg_dur,
             timeout=ffmpeg_timeout,
             on_log=on_log,
+            should_cancel=should_cancel,
         )
         part_size = os.path.getsize(part_path)
         if part_size > max_bytes:

@@ -468,6 +468,14 @@
       });
     }
 
+    function collectJobSourceRef(job) {
+      const url = (job.source_url || '').trim();
+      if (url) return url;
+      const path = (job.source_path || '').trim();
+      if (path) return path;
+      return '';
+    }
+
     function collectJobUrls(job) {
       const urls = [];
       if (job.download_page_gofile) urls.push(job.download_page_gofile);
@@ -506,12 +514,12 @@
       if (!actionsEl) return;
       const copyBtn = actionsEl.querySelector('[data-action="copy-link"]');
       const retryBtn = actionsEl.querySelector('[data-action="retry"]');
-      const urls = collectJobUrls(job);
+      const sourceRef = collectJobSourceRef(job);
       const isTerminal = ['done', 'error', 'cancelled'].includes(job.status);
-      const canRetry = isTerminal && !!(job.source_url || job.source_path);
+      const canRetry = isTerminal && !!sourceRef;
       if (copyBtn) {
-        copyBtn.disabled = !urls.length;
-        copyBtn.style.display = urls.length ? '' : 'none';
+        copyBtn.disabled = !sourceRef;
+        copyBtn.style.display = sourceRef ? '' : 'none';
       }
       if (retryBtn) {
         retryBtn.style.display = canRetry ? '' : 'none';
@@ -761,9 +769,8 @@
     async function copyJobLinks(jobId, btn) {
       const job = jobDataCache.get(jobId);
       if (!job) return;
-      const urls = collectJobUrls(job);
-      if (!urls.length) return;
-      const text = urls.join('\n');
+      const text = collectJobSourceRef(job);
+      if (!text) return;
       try {
         await navigator.clipboard.writeText(text);
         const prev = btn.textContent;

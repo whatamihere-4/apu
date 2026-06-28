@@ -41,7 +41,11 @@ from upload_provider import (
     resolve_split_mode,
 )
 from downloader import download_file, TransferCancelled
-from filester_upload import apply_folder_blacklist, fetch_folder_map_from_api
+from filester_upload import (
+    apply_folder_blacklist,
+    fetch_folder_map_from_api,
+    rename_split_upload_folder_for_stashdb,
+)
 from oshash_remote import fetch_oshash_from_url
 import goonbox_upload
 from queue_persist import track_add, track_remove
@@ -6037,10 +6041,29 @@ def _finalize_upload(
         for msg in failed:
             _append_job_log(job_id, f"Partial failure: {msg}")
 
+    effective_filester_folder = filester_folder_id
+    if split_info and filester_part_urls and filester_folder_id:
+        job = jobs.get(job_id) or {}
+        studio_folder_id = (job.get("filester_folder_id") or "").strip()
+        match = job.get("stashdb_match") or {}
+        scene_title = (match.get("title") or "").strip()
+        if studio_folder_id and scene_title and studio_folder_id != filester_folder_id:
+            filester_raws = [
+                r.raw for r in results
+                if r.provider == "filester" and r.ok and r.was_split
+            ]
+            effective_filester_folder = rename_split_upload_folder_for_stashdb(
+                parent_folder_id=studio_folder_id,
+                temp_folder_id=filester_folder_id,
+                scene_title=scene_title,
+                upload_responses=filester_raws,
+                on_log=lambda ln: _append_job_log(job_id, ln),
+            )
+
     gofile_url = gofile_urls[0] if gofile_urls else ""
     if filester_part_urls:
-        if filester_folder_id:
-            filester_url = folder_url(filester_folder_id, provider="filester")
+        if effective_filester_folder:
+            filester_url = folder_url(effective_filester_folder, provider="filester")
         else:
             filester_url = filester_part_urls[0]
     else:

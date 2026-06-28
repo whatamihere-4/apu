@@ -321,3 +321,130 @@ def upload_file(filepath, folder_id=None, on_progress=None, should_cancel=None):
         print(f"[FILESTER] {filename} FAILED: {result}", flush=True)
 
     return result
+
+
+def file_identifier_from_response(raw: dict) -> str:
+    """Return slug, numeric id, or uuid from a Filester upload JSON body."""
+    if not isinstance(raw, dict):
+        return ""
+    slug = str(raw.get("slug") or "").strip()
+    if slug:
+        return slug
+    file_id = raw.get("file_id")
+    if file_id is not None and str(file_id).strip():
+        return str(file_id).strip()
+    data = raw.get("data")
+    if isinstance(data, dict):
+        slug = str(data.get("slug") or "").strip()
+        if slug:
+            return slug
+        fid = data.get("id")
+        if fid is not None and str(fid).strip():
+            return str(fid).strip()
+        uuid_val = str(data.get("uuid") or "").strip()
+        if uuid_val:
+            return uuid_val
+    return ""
+
+
+def move_files(file_identifiers: list[str], folder_id: str) -> dict:
+    """Move files into ``folder_id`` via POST /api/v1/files/move (bulk)."""
+    ids = [str(x).strip() for x in file_identifiers if str(x).strip()]
+    if not ids:
+        raise ValueError("no file identifiers to move")
+    dest = (folder_id or "").strip()
+    if not dest:
+        raise ValueError("destination folder id required")
+
+    payload = {"files": ids, "folder": dest}
+    r = requests.post(
+        f"{FILESTER_BASE_URL}/api/v1/files/move",
+        headers={**_auth_headers(), "Content-Type": "application/json"},
+        json=payload,
+        timeout=120,
+    )
+    r.raise_for_status()
+    body = r.json()
+    if not body.get("success"):
+        raise RuntimeError(f"Filester move failed: {body}")
+    return body.get("data") if isinstance(body.get("data"), dict) else body
+
+
+def delete_folders(folder_identifiers: list[str]) -> dict:
+    """Delete folders (and contents) via POST /folder/delete."""
+    ids = [str(x).strip() for x in folder_identifiers if str(x).strip()]
+    if not ids:
+        raise ValueError("no folder identifiers to delete")
+    r = requests.post(
+        f"{FILESTER_BASE_URL}/folder/delete",
+        headers={**_auth_headers(), "Content-Type": "application/json"},
+        json={"identifiers": ids},
+        timeout=120,
+    )
+    r.raise_for_status()
+    body = r.json()
+    if not body.get("success"):
+        raise RuntimeError(f"Filester folder delete failed: {body}")
+    return body
+
+
+def rename_split_upload_folder_for_stashdb(
+    *,
+    parent_folder_id: str,
+    temp_folder_id: str,
+    scene_title: str,
+    upload_responses: list[dict],
+    on_log=None,
+) -> str:
+    """Create a StashDB-titled folder, move split parts, delete the temp folder.
+
+    Returns the folder id parts ended up in (scene folder on success, else temp).
+    """
+    parent = (parent_folder_id or "").strip()
+    temp = (temp_folder_id or "").strip()
+    title = sanitize_folder_name(scene_title)
+    if not parent or not temp or temp == parent or not title:
+        return temp or parent
+
+    file_ids = []
+    for raw in upload_responses:
+        fid = file_identifier_from_response(raw)
+        if fid:
+            file_ids.append(fid)
+    if not file_ids:
+        if on_log:
+            on_log("[Filester] StashDB folder rename skipped: no file ids in upload responses")
+        return temp
+
+    try:
+        scene_folder_id = create_folder(parent, title)
+        move_data = move_files(file_ids, scene_folder_id)
+        moved = int(move_data.get("moved") or 0)
+        failed = int(move_data.get("failed") or 0)
+        if failed or moved < len(file_ids):
+            if on_log:
+                on_log(
+                    f"[Filester] StashDB folder move incomplete "
+                    f"({moved}/{len(file_ids)} moved, {failed} failed); keeping temp folder"
+                )
+            return temp
+        try:
+            delete_folders([temp])
+        except Exception as e:  # noqa: BLE001
+            if on_log:
+                on_log(f"[Filester] Temp split folder delete failed ({e}); parts are in scene folder")
+        record_upload_subfolder(
+            scene_folder_id,
+            label=f"split upload: {title} (StashDB)",
+        )
+        if on_log:
+            on_log(
+                f'[Filester] Moved {moved} part(s) to StashDB folder "{title}" '
+                f"({folder_url(scene_folder_id)})"
+            )
+        return scene_folder_id
+    except Exception as e:  # noqa: BLE001
+        if on_log:
+            on_log(f"[Filester] StashDB folder rename failed ({e}); kept filename folder")
+        print(f"[FILESTER] StashDB folder rename failed: {e}", flush=True)
+        return temp
