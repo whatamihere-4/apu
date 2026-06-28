@@ -72,6 +72,18 @@
     }
     textarea { resize: vertical; min-height: 86px; line-height: 1.35; }
     input:focus, textarea:focus { border-color: var(--accent); }
+    select {
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 0.9rem;
+      padding: 0.62rem 0.75rem;
+      outline: none;
+      font-family: inherit;
+    }
+    select:focus { border-color: var(--accent); }
 
     .perf-header {
       display: flex; justify-content: space-between; align-items: center;
@@ -183,18 +195,22 @@
       background: var(--bg);
       margin-top: 0.4rem;
     }
-    .file-item {
-      display: flex; gap: 0.5rem; align-items: center;
-      padding: 0.4rem 0.7rem;
-      border-bottom: 1px solid var(--border);
+    .file-list .file-item {
+      display: flex;
+      justify-content: space-between;
+      gap: 0.5rem;
+      padding: 0.45rem 0.65rem;
       cursor: pointer;
       font-size: 0.85rem;
+      border-bottom: 1px solid var(--border);
     }
-    .file-item:last-child { border-bottom: none; }
-    .file-item:hover { background: rgba(109, 93, 252, 0.08); }
-    .file-item.selected { background: rgba(109, 93, 252, 0.15); }
-    .file-item .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .file-item .sz { color: var(--muted); font-size: 0.72rem; }
+    .file-list .file-item:last-child { border-bottom: none; }
+    .file-list .file-item:hover { background: rgba(109, 93, 252, 0.12); }
+    .file-list .file-item.selected {
+      background: rgba(109, 93, 252, 0.22);
+      outline: 1px solid var(--accent);
+    }
+    .file-list .file-item .sz { color: var(--muted); font-size: 0.78rem; white-space: nowrap; }
 
     .toggle-row {
       display: flex; align-items: center; gap: 0.5rem;
@@ -332,12 +348,8 @@
             <button type="button" class="btn secondary" id="cached-file-refresh" title="Reload list from scenes.json">Refresh</button>
             <button type="button" class="btn secondary" id="cached-file-browse">Browse</button>
           </div>
-          <p id="cached-file-hint" class="muted small" style="margin:0.35rem 0 0;"></p>
-          <label for="fp-filename" style="margin-top:0.6rem;">File in /downloads (basename only — same mount as hasher)</label>
-          <div class="file-row">
-            <input type="text" id="fp-filename" placeholder="myvideo.mp4">
-          </div>
-          <div id="fp-file-list" class="file-list" style="display:none;"></div>
+          <div class="file-list" id="downloads-file-list" style="display:none;"></div>
+          <p id="cached-file-hint" style="margin:0.35rem 0 0;font-size:0.8rem;color:var(--muted);"></p>
         </div>
 
         <div class="row">
@@ -407,14 +419,14 @@
       code: document.getElementById("code"),
       details: document.getElementById("details"),
     };
-    const fpFilename = document.getElementById("fp-filename");
+    let activeFilename = "";
     const fpDuration = document.getElementById("fp-duration");
     const fpClearBtn = document.getElementById("fp-clear-btn");
     const cachedFileSelectEl = document.getElementById("cached-file-select");
     const cachedFileRefreshBtn = document.getElementById("cached-file-refresh");
     const cachedFileBrowseBtn = document.getElementById("cached-file-browse");
     const cachedFileHintEl = document.getElementById("cached-file-hint");
-    const fpFileListEl = document.getElementById("fp-file-list");
+    const downloadsFileListEl = document.getElementById("downloads-file-list");
     const cachedFileByName = new Map();
 
     const hashFields = {
@@ -535,6 +547,8 @@
     }
 
     fpClearBtn.addEventListener("click", () => {
+      activeFilename = "";
+      cachedFileSelectEl.value = "";
       clearFingerprints();
       clearSteps();
       matchesEl.innerHTML = "";
@@ -574,7 +588,7 @@
 
     async function applyCachedFileSelection(name) {
       const fn = (name || "").trim();
-      fpFilename.value = fn;
+      activeFilename = fn;
       if (fn && cachedFileByName.has(fn)) {
         cachedFileSelectEl.value = fn;
       } else if (!fn) {
@@ -591,53 +605,59 @@
       if (fn) await loadCachedHashesForFilename(fn);
     }
 
-    async function loadDownloadsList(dir = "/downloads") {
-      try {
-        const r = await fetch(`/api/browse?path=${encodeURIComponent(dir)}`);
-        const data = await r.json();
-        const entries = (data.entries || [])
-          .filter((e) => !e.is_dir)
-          .sort((a, b) => a.name.localeCompare(b.name));
-        if (entries.length === 0) {
-          fpFileListEl.innerHTML = '<div style="padding:0.6rem;color:var(--muted);font-size:0.85rem;">No files in /downloads</div>';
-        } else {
-          fpFileListEl.innerHTML = entries
-            .map((e) => `<div class="file-item" data-name="${escAttr(e.name)}">
-              <span class="nm">${esc(e.name)}</span>
-              <span class="sz">${formatSize(e.size)}</span>
-            </div>`)
-            .join("");
-          fpFileListEl.querySelectorAll(".file-item").forEach((el) => {
-            el.addEventListener("click", () => {
-              fpFileListEl.querySelectorAll(".file-item").forEach((x) => x.classList.remove("selected"));
-              el.classList.add("selected");
-              void applyCachedFileSelection(el.dataset.name);
-            });
-          });
-        }
-        fpFileListEl.style.display = "block";
-      } catch (err) {
-        setStatus(autoStatus, "err", "Failed to list /downloads: " + err.message);
-      }
-    }
-    function formatSize(b) {
+    function formatFileSize(b) {
       if (!b) return "";
       const u = ["B", "KB", "MB", "GB", "TB"];
       const i = Math.floor(Math.log(b) / Math.log(1024));
       return (b / Math.pow(1024, i)).toFixed(1) + " " + u[i];
     }
+
+    async function loadDownloadsBrowse() {
+      try {
+        const r = await fetch("/api/browse?path=" + encodeURIComponent("/downloads"));
+        const data = await r.json();
+        const entries = (data.entries || [])
+          .filter((e) => !e.is_dir)
+          .sort((a, b) => a.name.localeCompare(b.name));
+        if (!entries.length) {
+          downloadsFileListEl.innerHTML =
+            '<div style="padding:0.6rem;color:var(--muted);font-size:0.85rem;">No files in /downloads</div>';
+        } else {
+          downloadsFileListEl.innerHTML = entries
+            .map(
+              (e) =>
+                `<div class="file-item" data-name="${escAttr(e.name)}">` +
+                `<span>${esc(e.name)}</span>` +
+                `<span class="sz">${formatFileSize(e.size)}</span></div>`,
+            )
+            .join("");
+          downloadsFileListEl.querySelectorAll(".file-item").forEach((el) => {
+            el.addEventListener("click", () => {
+              downloadsFileListEl.querySelectorAll(".file-item").forEach((x) => x.classList.remove("selected"));
+              el.classList.add("selected");
+              void applyCachedFileSelection(el.dataset.name);
+              downloadsFileListEl.style.display = "none";
+            });
+          });
+        }
+        downloadsFileListEl.style.display = "block";
+      } catch (err) {
+        cachedFileHintEl.textContent = "Browse failed: " + (err.message || err);
+      }
+    }
+
     cachedFileBrowseBtn.addEventListener("click", () => {
-      if (fpFileListEl.style.display === "none" || !fpFileListEl.style.display) {
-        loadDownloadsList();
+      if (downloadsFileListEl.style.display === "none" || !downloadsFileListEl.style.display) {
+        void loadDownloadsBrowse();
       } else {
-        fpFileListEl.style.display = "none";
+        downloadsFileListEl.style.display = "none";
       }
     });
     cachedFileSelectEl.addEventListener("change", () => {
       void applyCachedFileSelection(cachedFileSelectEl.value);
     });
     cachedFileRefreshBtn.addEventListener("click", () => {
-      void loadCachedFilesList(cachedFileSelectEl.value || fpFilename.value.trim());
+      void loadCachedFilesList(cachedFileSelectEl.value || activeFilename);
     });
 
     function gatherDraftPayload() {
@@ -877,7 +897,7 @@
     }
 
     async function runPipeline({ allowSubmit }) {
-      const filename = fpFilename.value.trim();
+      const filename = activeFilename.trim();
       if (!filename) {
         setStatus(autoStatus, "err", "Pick a file in /downloads first.");
         return;
@@ -1086,24 +1106,6 @@
       }
     }
 
-    fpFilename.addEventListener("change", () => {
-      const fn = fpFilename.value.trim();
-      if (fn && cachedFileByName.has(fn)) {
-        cachedFileSelectEl.value = fn;
-      } else if (!fn) {
-        cachedFileSelectEl.value = "";
-      }
-      stickyRemoteBundle = false;
-      clearFingerprints();
-      clearSteps();
-      matchesEl.innerHTML = "";
-      overrideRow.style.display = "none";
-      overrideChk.checked = false;
-      setStatus(autoStatus, "", "");
-      setStatus(submitStatus, "", "");
-      loadCachedHashesForFilename(fn);
-    });
-
     runAutoBtn.addEventListener("click", () => runPipeline({ allowSubmit: true }));
     runDetectBtn.addEventListener("click", () => runPipeline({ allowSubmit: false }));
 
@@ -1166,8 +1168,7 @@
 
       if (qFilename) {
         await loadCachedFilesList(qFilename);
-        fpFilename.value = qFilename;
-        await loadCachedHashesForFilename(qFilename);
+        await applyCachedFileSelection(qFilename);
       } else {
         await loadCachedFilesList("");
       }

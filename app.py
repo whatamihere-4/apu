@@ -41,7 +41,7 @@ from upload_provider import (
     resolve_split_mode,
 )
 from downloader import download_file, TransferCancelled
-from filester_upload import fetch_folder_map_from_api
+from filester_upload import fetch_folder_map_from_api, load_upload_subfolder_blacklist
 from oshash_remote import fetch_oshash_from_url
 import goonbox_upload
 from queue_persist import track_add, track_remove
@@ -194,6 +194,9 @@ FILESTER_FOLDER_SYNC_INTERVAL_SEC = max(
     60,
     _env_int("FILESTER_FOLDER_SYNC_INTERVAL_SEC", 3600),
 )
+FILESTER_FOLDER_SYNC_INCLUDE_CHILDREN = _env_yes(
+    "FILESTER_FOLDER_SYNC_INCLUDE_CHILDREN", default="0"
+)
 
 
 GOONBOX_BASE_URL = (os.environ.get("GOONBOX_BASE_URL") or "https://goonbox.cr").rstrip("/")
@@ -331,7 +334,12 @@ def _sync_filester_folders_from_api(*, mode: str = "replace") -> dict:
 
     mode: ``replace`` (API is source of truth) or ``merge`` (keep local-only ids).
     """
-    remote = fetch_folder_map_from_api()
+    remote = fetch_folder_map_from_api(
+        include_children=FILESTER_FOLDER_SYNC_INCLUDE_CHILDREN
+    )
+    blacklist = load_upload_subfolder_blacklist()
+    if blacklist:
+        remote = {k: v for k, v in remote.items() if k not in blacklist}
     if mode == "merge":
         merged = dict(_load_filester_folders())
         merged.update(remote)

@@ -6,6 +6,7 @@ env-var change (UPLOAD_PROVIDER=filester) plus FILESTER_API_KEY.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import time
@@ -32,8 +33,8 @@ def _auth_headers():
     return h
 
 
-def _flatten_folder_rows(rows: list, out: dict[str, str]) -> None:
-    """Recursively collect {id: name} from Filester folder list payloads."""
+def _flatten_folder_rows(rows: list, out: dict[str, str], *, recurse: bool = True) -> None:
+    """Collect {id: name} from Filester folder list payloads."""
     for item in rows:
         if not isinstance(item, dict):
             continue
@@ -41,10 +42,12 @@ def _flatten_folder_rows(rows: list, out: dict[str, str]) -> None:
         name = str(item.get("name") or "").strip()
         if fid and name:
             out[fid] = name
+        if not recurse:
+            continue
         for child_key in ("children", "folders", "subfolders"):
             children = item.get(child_key)
             if isinstance(children, list) and children:
-                _flatten_folder_rows(children, out)
+                _flatten_folder_rows(children, out, recurse=recurse)
 
 
 def sanitize_folder_name(name: str, *, max_len: int = _FOLDER_NAME_MAX) -> str:
@@ -58,8 +61,12 @@ def sanitize_folder_name(name: str, *, max_len: int = _FOLDER_NAME_MAX) -> str:
     return s or "upload"
 
 
-def fetch_folder_map_from_api() -> dict[str, str]:
-    """Download the account folder map from GET /api/v1/folders."""
+def fetch_folder_map_from_api(*, include_children: bool = False) -> dict[str, str]:
+    """Download the account folder map from GET /api/v1/folders.
+
+    Default ``include_children=False`` syncs only top-level studio folders and
+    skips nested per-video split subfolders created under them.
+    """
     if not FILESTER_API_KEY:
         raise RuntimeError("FILESTER_API_KEY is not set")
     url = f"{FILESTER_BASE_URL}/api/v1/folders"
@@ -72,8 +79,55 @@ def fetch_folder_map_from_api() -> dict[str, str]:
     if not isinstance(rows, list):
         raise RuntimeError(f"Unexpected Filester folders response: {body!r}")
     out: dict[str, str] = {}
-    _flatten_folder_rows(rows, out)
+    _flatten_folder_rows(rows, out, recurse=include_children)
     return out
+
+
+def _blacklist_file_path() -> str:
+    explicit = (os.environ.get("FILESTER_FOLDER_BLACKLIST_FILE") or "").strip()
+    if explicit:
+        return explicit
+    cache = (os.environ.get("CACHE_DIR") or "").strip()
+    if cache:
+        return os.path.join(cache, "filester-folder-blacklist.json")
+    return ""
+
+
+def load_upload_subfolder_blacklist() -> set[str]:
+    """Folder ids created for split uploads — never promoted to studio map."""
+    path = _blacklist_file_path()
+    if not path:
+        return set()
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return {str(x).strip() for x in data if str(x).strip()}
+        if isinstance(data, dict):
+            ids = data.get("folder_ids") or data.get("ids") or []
+            if isinstance(ids, list):
+                return {str(x).strip() for x in ids if str(x).strip()}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
+    return set()
+
+
+def record_upload_subfolder(folder_id: str) -> None:
+    """Append a split-upload subfolder id to the blacklist JSON."""
+    fid = (folder_id or "").strip()
+    path = _blacklist_file_path()
+    if not fid or not path:
+        return
+    current = load_upload_subfolder_blacklist()
+    if fid in current:
+        return
+    current.add(fid)
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    payload = {"folder_ids": sorted(current)}
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, sort_keys=True)
+    os.replace(tmp, path)
 
 
 def get_root_folder_id():

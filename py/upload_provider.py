@@ -288,6 +288,7 @@ def _upload_filester_parts(
         try:
             subfolder_id = filester_upload.create_folder(upload_folder_id, stem or original_basename)
             upload_folder_id = subfolder_id
+            filester_upload.record_upload_subfolder(subfolder_id)
             if on_log:
                 on_log(
                     f'[Filester] Created subfolder "{filester_upload.sanitize_folder_name(stem or original_basename)}" '
