@@ -289,22 +289,11 @@ def _upload_filester_parts(
     original_basename = os.path.basename(src)
     stem, _ext = os.path.splitext(original_basename)
 
-    if upload_folder_id:
-        try:
-            subfolder_id = filester_upload.create_folder(upload_folder_id, stem or original_basename)
-            upload_folder_id = subfolder_id
-            filester_upload.record_upload_subfolder(
-                subfolder_id,
-                label=f"split upload: {stem or original_basename}",
-            )
-            if on_log:
-                on_log(
-                    f'[Filester] Created subfolder "{filester_upload.sanitize_folder_name(stem or original_basename)}" '
-                    f"for split parts (parent studio folder)"
-                )
-        except Exception as e:
-            if on_log:
-                on_log(f"[Filester] Subfolder create failed ({e}); uploading parts to studio folder")
+    if upload_folder_id and on_log:
+        on_log(
+            "[Filester] Split parts upload to studio folder first; "
+            "subfolder (StashDB title or filename) is created after upload"
+        )
     if on_log:
         if FILESTER_SPLIT_MODE == "optimal" and needs_split:
             on_log(

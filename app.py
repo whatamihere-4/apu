@@ -45,6 +45,7 @@ from downloader import download_file, TransferCancelled
 from filester_upload import (
     apply_folder_blacklist,
     fetch_folder_map_from_api,
+    organize_split_parts_into_folder,
     rename_split_upload_folder_for_stashdb,
 )
 from oshash_remote import fetch_oshash_from_url
@@ -6035,20 +6036,33 @@ def _finalize_upload(
     if split_info and filester_part_urls and filester_folder_id:
         job = jobs.get(job_id) or {}
         studio_folder_id = (job.get("filester_folder_id") or "").strip()
+        filester_raws = [
+            r.raw for r in results
+            if r.provider == "filester" and r.ok and r.was_split
+        ]
         match = job.get("stashdb_match") or {}
         scene_title = (match.get("title") or "").strip()
-        if studio_folder_id and scene_title and studio_folder_id != filester_folder_id:
-            filester_raws = [
-                r.raw for r in results
-                if r.provider == "filester" and r.ok and r.was_split
-            ]
-            effective_filester_folder = rename_split_upload_folder_for_stashdb(
-                parent_folder_id=studio_folder_id,
-                temp_folder_id=filester_folder_id,
-                scene_title=scene_title,
-                upload_responses=filester_raws,
-                on_log=lambda ln: _append_job_log(job_id, ln),
-            )
+        log_fn = lambda ln: _append_job_log(job_id, ln)
+        if studio_folder_id and filester_raws:
+            if scene_title:
+                effective_filester_folder = rename_split_upload_folder_for_stashdb(
+                    parent_folder_id=studio_folder_id,
+                    scene_title=scene_title,
+                    upload_responses=filester_raws,
+                    on_log=log_fn,
+                )
+            else:
+                stem, _ext = os.path.splitext(
+                    split_info.get("original_basename") or ""
+                )
+                fallback_name = stem or (job.get("source_filename") or "upload")
+                effective_filester_folder = organize_split_parts_into_folder(
+                    parent_folder_id=studio_folder_id,
+                    folder_name=fallback_name,
+                    upload_responses=filester_raws,
+                    blacklist_label=f"split upload: {fallback_name}",
+                    on_log=log_fn,
+                )
 
     gofile_url = gofile_urls[0] if gofile_urls else ""
     if filester_part_urls:

@@ -505,23 +505,24 @@ def delete_empty_folder(folder_id: str, *, on_log=None) -> bool:
     return True
 
 
-def rename_split_upload_folder_for_stashdb(
+def organize_split_parts_into_folder(
     *,
     parent_folder_id: str,
-    temp_folder_id: str,
-    scene_title: str,
+    folder_name: str,
     upload_responses: list[dict],
+    blacklist_label: str = "",
     on_log=None,
 ) -> str:
-    """Create a StashDB-titled folder, move split parts, delete the temp folder.
+    """Create a subfolder under ``parent_folder_id`` and move split parts into it.
 
-    Returns the folder id parts ended up in (scene folder on success, else temp).
+    Parts are expected to live in the studio parent folder during upload; this
+    runs at job finalize so StashDB can supply the folder name first. Returns
+    the destination folder id, or ``parent_folder_id`` if organize failed.
     """
     parent = (parent_folder_id or "").strip()
-    temp = (temp_folder_id or "").strip()
-    title = sanitize_folder_name(scene_title)
-    if not parent or not temp or temp == parent or not title:
-        return temp or parent
+    title = sanitize_folder_name(folder_name)
+    if not parent or not title:
+        return parent
 
     file_ids = []
     for raw in upload_responses:
@@ -530,41 +531,58 @@ def rename_split_upload_folder_for_stashdb(
             file_ids.append(fid)
     if not file_ids:
         if on_log:
-            on_log("[Filester] StashDB folder rename skipped: no file ids in upload responses")
-        return temp
+            on_log("[Filester] Split folder organize skipped: no file ids in upload responses")
+        return parent
 
     try:
-        scene_folder_id = create_folder(parent, title)
-        move_data = move_files(file_ids, scene_folder_id)
+        dest_folder_id = create_folder(parent, title)
+        move_data = move_files(file_ids, dest_folder_id)
         moved = int(move_data.get("moved") or 0)
         failed = int(move_data.get("failed") or 0)
         if failed or moved < len(file_ids):
             if on_log:
                 on_log(
-                    f"[Filester] StashDB folder move incomplete "
-                    f"({moved}/{len(file_ids)} moved, {failed} failed); keeping temp folder"
+                    f"[Filester] Split folder move incomplete "
+                    f"({moved}/{len(file_ids)} moved, {failed} failed); "
+                    f"parts remain in studio folder"
                 )
-            return temp
-        try:
-            if delete_empty_folder(temp, on_log=on_log):
-                if on_log:
-                    on_log("[Filester] Removed empty temp folder after StashDB rename")
-        except Exception as e:  # noqa: BLE001
-            if on_log:
-                on_log(f"[Filester] Temp split folder delete failed ({e}); parts are in scene folder")
-            print(f"[FILESTER] temp folder delete failed: {e}", flush=True)
+            return parent
         record_upload_subfolder(
-            scene_folder_id,
-            label=f"split upload: {title} (StashDB)",
+            dest_folder_id,
+            label=blacklist_label or f"split upload: {title}",
         )
         if on_log:
             on_log(
-                f'[Filester] Moved {moved} part(s) to StashDB folder "{title}" '
-                f"({folder_url(scene_folder_id)})"
+                f'[Filester] Moved {moved} part(s) into folder "{title}" '
+                f"({folder_url(dest_folder_id)})"
             )
-        return scene_folder_id
+        return dest_folder_id
     except Exception as e:  # noqa: BLE001
         if on_log:
-            on_log(f"[Filester] StashDB folder rename failed ({e}); kept filename folder")
-        print(f"[FILESTER] StashDB folder rename failed: {e}", flush=True)
-        return temp
+            on_log(f"[Filester] Split folder organize failed ({e}); parts remain in studio folder")
+        print(f"[FILESTER] split folder organize failed: {e}", flush=True)
+        return parent
+
+
+def rename_split_upload_folder_for_stashdb(
+    *,
+    parent_folder_id: str,
+    scene_title: str,
+    upload_responses: list[dict],
+    on_log=None,
+    temp_folder_id: str | None = None,
+) -> str:
+    """Create a StashDB-titled folder and move split parts into it.
+
+    ``temp_folder_id`` is ignored (legacy): parts upload flat into the studio
+    folder and are organized here — no temp folder to delete.
+    """
+    _ = temp_folder_id
+    title = sanitize_folder_name(scene_title)
+    return organize_split_parts_into_folder(
+        parent_folder_id=parent_folder_id,
+        folder_name=scene_title,
+        upload_responses=upload_responses,
+        blacklist_label=f"split upload: {title} (StashDB)",
+        on_log=on_log,
+    )
