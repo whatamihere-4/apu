@@ -267,6 +267,11 @@ def _upload_filester_parts(
     needs_split = size > FILESTER_MAX_PART_BYTES
     split_mode = resolve_split_mode(size)
     upload_folder_id = (folder_id or "").strip() or None
+    split_progress = (
+        on_progress
+        if on_progress is not None and hasattr(on_progress, "set_splitting")
+        else None
+    )
 
     if not needs_split:
         raw = filester_upload.upload_file(
@@ -315,6 +320,8 @@ def _upload_filester_parts(
             size, FILESTER_MAX_PART_BYTES, split_mode=split_mode
         )
         on_log(f"[Filester] Split upload needs ~{need_gb:.1f} GiB peak disk")
+        if split_progress is not None:
+            split_progress.set_splitting(source_bytes=size)
 
     def _skip_check():
         if should_cancel and should_cancel():
@@ -356,18 +363,32 @@ def _upload_filester_parts(
                 raise TransferCancelled("Upload cancelled")
             part_path = part["path"]
             last_part = part
+            part_count = int(part.get("part_count") or 1)
+            part_index = int(part.get("part_index") or 0)
+            if split_progress is not None and part_count > 1 and part_index > 0:
+                split_progress.register_part(
+                    part_index,
+                    part.get("filename") or os.path.basename(part_path),
+                    int(part.get("size_bytes") or 0),
+                    part_count,
+                )
             if on_log and not part.get("is_source"):
                 on_log(
-                    f"[Filester] Uploading part {part['part_index']}/{part['part_count']}: "
+                    f"[Filester] Uploading part {part_index}/{part_count}: "
                     f"{part['filename']} ({format_size(part['size_bytes'])})"
                 )
+            part_on_progress = on_progress
+            if split_progress is not None and part_count > 1 and part_index > 0:
+                part_on_progress = split_progress.wrap_part(part_index)
             raw = filester_upload.upload_file(
                 part_path,
                 folder_id=upload_folder_id,
-                on_progress=on_progress,
+                on_progress=part_on_progress,
                 should_cancel=should_cancel,
             )
             results.append(_normalize_filester(raw, part=part))
+            if split_progress is not None and part_count > 1 and part_index > 0:
+                split_progress.complete_part(part_index)
             if not part.get("is_source"):
                 try:
                     os.remove(part_path)

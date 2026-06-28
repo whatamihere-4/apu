@@ -10,6 +10,7 @@ import json
 import os
 import re
 import time
+import urllib.parse
 
 import requests
 from requests_toolbelt import MultipartEncoder, MultipartEncoderMonitor
@@ -156,6 +157,38 @@ def record_upload_subfolder(folder_id: str, *, label: str = "") -> None:
         notes[fid] = "split upload subfolder (auto)"
 
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    payload: dict = {"folder_ids": sorted(current_ids)}
+    if notes:
+        payload["notes"] = {k: notes[k] for k in sorted(current_ids) if k in notes}
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, sort_keys=True)
+    os.replace(tmp, path)
+
+
+def remove_folder_from_blacklist(folder_id: str) -> None:
+    """Drop a folder id from the blacklist JSON (e.g. after temp folder delete)."""
+    fid = (folder_id or "").strip()
+    path = _blacklist_file_path()
+    if not fid or not path or not os.path.isfile(path):
+        return
+    current_ids = load_folder_blacklist()
+    if fid not in current_ids:
+        return
+    current_ids.discard(fid)
+
+    notes: dict[str, str] = {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            existing = json.load(f)
+        if isinstance(existing, dict):
+            raw_notes = existing.get("notes") or existing.get("labels") or {}
+            if isinstance(raw_notes, dict):
+                notes = {str(k): str(v) for k, v in raw_notes.items()}
+    except (json.JSONDecodeError, OSError):
+        notes = {}
+    notes.pop(fid, None)
+
     payload: dict = {"folder_ids": sorted(current_ids)}
     if notes:
         payload["notes"] = {k: notes[k] for k in sorted(current_ids) if k in notes}
@@ -370,22 +403,106 @@ def move_files(file_identifiers: list[str], folder_id: str) -> dict:
     return body.get("data") if isinstance(body.get("data"), dict) else body
 
 
-def delete_folders(folder_identifiers: list[str]) -> dict:
-    """Delete folders (and contents) via POST /folder/delete."""
-    ids = [str(x).strip() for x in folder_identifiers if str(x).strip()]
-    if not ids:
-        raise ValueError("no folder identifiers to delete")
-    r = requests.post(
-        f"{FILESTER_BASE_URL}/folder/delete",
-        headers={**_auth_headers(), "Content-Type": "application/json"},
-        json={"identifiers": ids},
-        timeout=120,
-    )
+def list_folder_files(folder_id: str) -> list[dict]:
+    """List files in a folder via GET /api/v1/folder/{identifier}/files."""
+    fid = (folder_id or "").strip()
+    if not fid:
+        return []
+    url = f"{FILESTER_BASE_URL}/api/v1/folder/{urllib.parse.quote(fid, safe='')}/files"
+    r = requests.get(url, headers=_auth_headers(), timeout=60)
     r.raise_for_status()
     body = r.json()
     if not body.get("success"):
-        raise RuntimeError(f"Filester folder delete failed: {body}")
-    return body
+        return []
+    data = body.get("data")
+    return data if isinstance(data, list) else []
+
+
+def _folder_delete_success(body: dict) -> bool:
+    if not isinstance(body, dict):
+        return False
+    if body.get("success") is True:
+        return True
+    deleted = body.get("successful_deletes")
+    if deleted is not None and int(deleted) >= 1:
+        return True
+    return False
+
+
+def delete_folder(folder_id: str) -> dict:
+    """Delete one folder, trying documented and v1 API path variants."""
+    fid = (folder_id or "").strip()
+    if not fid:
+        raise ValueError("folder id required")
+
+    headers = {**_auth_headers(), "Content-Type": "application/json"}
+    attempts: list[tuple[str, str, dict | None]] = [
+        ("POST", f"{FILESTER_BASE_URL}/api/v1/folder/delete", {"identifiers": [fid]}),
+        ("POST", f"{FILESTER_BASE_URL}/api/v1/folder/delete", {"folder": fid}),
+        ("POST", f"{FILESTER_BASE_URL}/api/v1/folders/delete", {"identifiers": [fid]}),
+        ("POST", f"{FILESTER_BASE_URL}/api/v1/folders/delete", {"folders": [fid]}),
+        ("POST", f"{FILESTER_BASE_URL}/folder/delete", {"identifiers": [fid]}),
+        ("POST", f"{FILESTER_BASE_URL}/api/v1/folder/{urllib.parse.quote(fid, safe='')}/delete", {}),
+        ("DELETE", f"{FILESTER_BASE_URL}/api/v1/folder/{urllib.parse.quote(fid, safe='')}", None),
+    ]
+
+    errors: list[str] = []
+    for method, url, payload in attempts:
+        try:
+            if method == "DELETE":
+                r = requests.delete(url, headers=_auth_headers(), timeout=60)
+            else:
+                r = requests.post(url, headers=headers, json=payload, timeout=60)
+            if r.status_code == 404:
+                return {"success": True, "message": "folder already gone", "url": url}
+            if r.status_code >= 400:
+                snippet = (r.text or "")[:240]
+                errors.append(f"{method} {url} -> HTTP {r.status_code}: {snippet}")
+                continue
+            try:
+                body = r.json()
+            except ValueError:
+                errors.append(f"{method} {url} -> non-JSON response")
+                continue
+            if _folder_delete_success(body):
+                return body
+            errors.append(f"{method} {url} -> {body!r}")
+        except requests.RequestException as e:
+            errors.append(f"{method} {url} -> {e}")
+
+    raise RuntimeError(
+        f"Filester folder delete failed for {fid!r}; tried {len(attempts)} variants. "
+        f"Last: {errors[-1] if errors else 'unknown'}"
+    )
+
+
+def delete_folders(folder_identifiers: list[str]) -> dict:
+    """Delete folders one at a time (API bulk shape varies by deployment)."""
+    ids = [str(x).strip() for x in folder_identifiers if str(x).strip()]
+    if not ids:
+        raise ValueError("no folder identifiers to delete")
+    last: dict = {}
+    for fid in ids:
+        last = delete_folder(fid)
+    return last
+
+
+def delete_empty_folder(folder_id: str, *, on_log=None) -> bool:
+    """Delete a folder after confirming it has no files."""
+    fid = (folder_id or "").strip()
+    if not fid:
+        return False
+    remaining = list_folder_files(fid)
+    if remaining:
+        msg = f"folder {fid} still has {len(remaining)} file(s); skipping delete"
+        print(f"[FILESTER] {msg}", flush=True)
+        if on_log:
+            on_log(f"[Filester] Temp folder cleanup skipped: {msg}")
+        return False
+    delete_folder(fid)
+    remove_folder_from_blacklist(fid)
+    print(f"[FILESTER] deleted empty folder {fid}", flush=True)
+    return True
 
 
 def rename_split_upload_folder_for_stashdb(
@@ -429,10 +546,13 @@ def rename_split_upload_folder_for_stashdb(
                 )
             return temp
         try:
-            delete_folders([temp])
+            if delete_empty_folder(temp, on_log=on_log):
+                if on_log:
+                    on_log("[Filester] Removed empty temp folder after StashDB rename")
         except Exception as e:  # noqa: BLE001
             if on_log:
                 on_log(f"[Filester] Temp split folder delete failed ({e}); parts are in scene folder")
+            print(f"[FILESTER] temp folder delete failed: {e}", flush=True)
         record_upload_subfolder(
             scene_folder_id,
             label=f"split upload: {title} (StashDB)",

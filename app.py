@@ -40,6 +40,7 @@ from upload_provider import (
     FILESTER_SPLIT_FALLBACK,
     resolve_split_mode,
 )
+from upload_progress import UploadProgressReporter
 from downloader import download_file, TransferCancelled
 from filester_upload import (
     apply_folder_blacklist,
@@ -5979,24 +5980,13 @@ def _make_dl_progress(job_id):
 
 
 def _make_ul_progress(job_id, folder_name):
-    dest = f" → {folder_name}" if folder_name else ""
-
-    def cb(pct, uploaded, total, speed, eta):
-        if _is_cancelled(job_id):
-            return
-        jobs[job_id]["progress"] = {
-            "type": "upload", "percent": round(pct, 1),
-            "uploaded": uploaded, "total": total, "speed": speed, "eta": int(eta),
-            "uploaded_fmt": format_size(uploaded), "total_fmt": format_size(total),
-            "speed_fmt": f"{format_size(speed)}/s",
-            "folder_name": folder_name or "Root",
-        }
-        jobs[job_id]["status_text"] = (
-            f"Uploading{dest}: {pct:.1f}% — "
-            f"{format_size(uploaded)}/{format_size(total)} "
-            f"@ {format_size(speed)}/s — ETA {int(eta)}s"
-        )
-    return cb
+    return UploadProgressReporter(
+        jobs,
+        job_id,
+        folder_name,
+        format_size=format_size,
+        is_cancelled=lambda: _is_cancelled(job_id),
+    )
 
 
 def _finalize_upload(

@@ -190,10 +190,35 @@
     .job-action-btn:disabled { opacity: 0.45; cursor: not-allowed; }
 
     .progress-wrap { width: 100%; height: 6px; background: var(--bg); border-radius: 3px; overflow: hidden; }
+    .progress-wrap-overall { height: 8px; margin-top: 0.35rem; }
     .progress-bar {
       height: 100%; background: var(--accent); border-radius: 3px;
       transition: width 0.4s ease; width: 0%;
     }
+    .upload-overall-label {
+      font-size: 0.68rem; font-weight: 600; color: var(--muted);
+      margin-top: 0.35rem; letter-spacing: 0.02em; text-transform: uppercase;
+    }
+    .upload-parts-list {
+      margin-top: 0.45rem; display: none; flex-direction: column; gap: 0.32rem;
+    }
+    .upload-part-row {
+      display: grid; grid-template-columns: minmax(0, 1fr) 5rem 2.2rem;
+      align-items: center; gap: 0.45rem; font-size: 0.68rem;
+    }
+    .upload-part-label {
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted);
+    }
+    .upload-part-row.uploading .upload-part-label { color: var(--accent); font-weight: 600; }
+    .upload-part-row.done .upload-part-label { color: var(--success); }
+    .upload-part-bar-wrap { height: 4px; }
+    .upload-part-bar {
+      height: 100%; background: var(--accent); border-radius: 2px;
+      transition: width 0.35s ease; width: 0%;
+    }
+    .upload-part-row.done .upload-part-bar { background: var(--success); }
+    .upload-part-row.pending .upload-part-bar { background: var(--border); width: 0 !important; }
+    .upload-part-pct { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
     .progress-bar.indeterminate {
       width: 30%;
       animation: indeterminate 1.5s ease-in-out infinite;
@@ -435,7 +460,9 @@
         `</div>` +
         folderHtml +
         `<div class="job-status"></div>` +
-        `<div class="progress-wrap"><div class="progress-bar"></div></div>` +
+        `<div class="upload-overall-label" style="display:none"></div>` +
+        `<div class="progress-wrap progress-wrap-overall"><div class="progress-bar"></div></div>` +
+        `<div class="upload-parts-list"></div>` +
         `<div class="progress-detail"></div>` +
         `<div class="progress-log"></div>` +
         `<div class="job-actions">` +
@@ -526,6 +553,88 @@
       }
     }
 
+    function renderUploadProgress(el, p) {
+      const barEl = el.querySelector('.progress-bar');
+      const detailEl = el.querySelector('.progress-detail');
+      const partsEl = el.querySelector('.upload-parts-list');
+      const overallLabel = el.querySelector('.upload-overall-label');
+      if (!barEl || !detailEl) return;
+
+      if (!p || p.type !== 'upload') {
+        if (partsEl) partsEl.style.display = 'none';
+        if (overallLabel) overallLabel.style.display = 'none';
+        barEl.classList.add('indeterminate');
+        barEl.style.background = 'var(--accent)';
+        detailEl.textContent = '';
+        return;
+      }
+
+      const isSplit = p.mode === 'split' && Array.isArray(p.parts) && p.parts.length > 0;
+      if (overallLabel) {
+        if (isSplit) {
+          overallLabel.style.display = 'block';
+          if (p.phase === 'splitting') {
+            overallLabel.textContent = p.label || 'Splitting for Filester upload';
+          } else {
+            overallLabel.textContent = `Overall upload${p.part_count ? ` · ${p.part_count} parts` : ''}`;
+          }
+        } else {
+          overallLabel.style.display = 'none';
+        }
+      }
+
+      if (partsEl) {
+        if (isSplit) {
+          partsEl.style.display = 'flex';
+          partsEl.innerHTML = p.parts.map((part) => {
+            const st = part.status || 'pending';
+            const pct = part.percent != null ? part.percent : 0;
+            const lbl = part.label || `Part ${part.index}`;
+            const sizeHint = part.size_fmt ? ` (${part.size_fmt})` : '';
+            return (
+              `<div class="upload-part-row ${escHtml(st)}">` +
+                `<span class="upload-part-label" title="${escHtml(lbl + sizeHint)}">${escHtml(lbl)}</span>` +
+                `<div class="progress-wrap upload-part-bar-wrap">` +
+                  `<div class="upload-part-bar" style="width:${Math.max(0, Math.min(100, pct))}%"></div>` +
+                `</div>` +
+                `<span class="upload-part-pct">${st === 'pending' ? '…' : pct.toFixed(0) + '%'}</span>` +
+              `</div>`
+            );
+          }).join('');
+        } else {
+          partsEl.style.display = 'none';
+          partsEl.innerHTML = '';
+        }
+      }
+
+      barEl.style.background = 'var(--accent)';
+      if (p.phase === 'splitting') {
+        barEl.classList.add('indeterminate');
+        barEl.style.width = '';
+        const bits = [p.source_fmt ? `Source ${p.source_fmt}` : 'Preparing parts'];
+        if (p.folder_name) bits.push(`Folder: ${p.folder_name}`);
+        detailEl.textContent = bits.join('  ·  ');
+        return;
+      }
+
+      if (p.percent !== undefined) {
+        barEl.classList.remove('indeterminate');
+        barEl.style.width = p.percent + '%';
+      } else {
+        barEl.classList.add('indeterminate');
+      }
+
+      const parts = [];
+      if (p.uploaded_fmt && p.total_fmt) parts.push(`${p.uploaded_fmt} / ${p.total_fmt}`);
+      if (p.speed_fmt) parts.push(p.speed_fmt);
+      if (p.eta !== undefined && p.eta > 0) parts.push(`ETA ${p.eta}s`);
+      if (p.folder_name) parts.push(`Folder: ${p.folder_name}`);
+      if (isSplit && p.current_part && p.part_count) {
+        parts.unshift(`Part ${p.current_part}/${p.part_count} uploading`);
+      }
+      detailEl.textContent = parts.join('  ·  ');
+    }
+
     function renderJob(id, job) {
       jobDataCache.set(id, job);
       const el = ensureJobEl(id, job.title || id, job.folder_name || '');
@@ -539,6 +648,13 @@
 
       const isTerminal = ['done', 'error', 'cancelled'].includes(job.status);
       if (cancelBtn) cancelBtn.style.display = isTerminal ? 'none' : '';
+
+      const partsListEl = el.querySelector('.upload-parts-list');
+      const overallLabelEl = el.querySelector('.upload-overall-label');
+      if (isTerminal || job.status === 'queued') {
+        if (partsListEl) { partsListEl.style.display = 'none'; partsListEl.innerHTML = ''; }
+        if (overallLabelEl) overallLabelEl.style.display = 'none';
+      }
 
       if (job.status === 'done') {
         statusEl.className = 'job-status done';
@@ -690,17 +806,13 @@
         statusEl.textContent = job.status_text || job.status;
 
         const p = job.progress;
-        if (p && p.type === 'upload' && p.percent !== undefined) {
-          barEl.classList.remove('indeterminate');
-          barEl.style.background = 'var(--accent)';
-          barEl.style.width = p.percent + '%';
-          const parts = [];
-          if (p.uploaded_fmt && p.total_fmt) parts.push(`${p.uploaded_fmt} / ${p.total_fmt}`);
-          if (p.speed_fmt) parts.push(p.speed_fmt);
-          if (p.eta !== undefined && p.eta > 0) parts.push(`ETA ${p.eta}s`);
-          if (p.folder_name) parts.push(`Folder: ${p.folder_name}`);
-          detailEl.textContent = parts.join('  ·  ');
+        if (p && p.type === 'upload') {
+          renderUploadProgress(el, p);
         } else if (p && p.type === 'download') {
+          const partsEl = el.querySelector('.upload-parts-list');
+          const overallLabel = el.querySelector('.upload-overall-label');
+          if (partsEl) partsEl.style.display = 'none';
+          if (overallLabel) overallLabel.style.display = 'none';
           barEl.style.background = 'var(--accent)';
           if (p.percent !== undefined && p.percent >= 0) {
             barEl.classList.remove('indeterminate');
@@ -716,9 +828,9 @@
           if (p.eta !== undefined && p.eta >= 0) parts.push(`ETA ${p.eta}s`);
           detailEl.textContent = parts.join('  ·  ');
         } else {
+          renderUploadProgress(el, null);
           barEl.classList.add('indeterminate');
           barEl.style.background = 'var(--accent)';
-          detailEl.textContent = '';
         }
         const hp = job.hash_progress;
         if (hp && hp.algorithm === 'PHASH') {
