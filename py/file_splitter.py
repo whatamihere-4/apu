@@ -62,12 +62,22 @@ def _part_paths(output_dir: str, stem: str, ext: str) -> list[str]:
     return [p for _, p in parts]
 
 
+def _copy_stream_maps() -> list[str]:
+    """Maps for stream-copy splits: video + audio only.
+
+    Sources often carry timecode/data/subtitle tracks that cannot be muxed into
+    MP4 segment output (``codec none`` / ``Could not write header``). Browser
+    parts only need A/V anyway.
+    """
+    return ["-map", "0:v", "-map", "0:a?"]
+
+
 def _run_segment(path, output_dir, stem, ext, segment_time, timeout, on_log):
     pattern = os.path.join(output_dir, f"{stem}.PART%d{ext}")
     cmd = [
         FFMPEG_BIN, "-hide_banner", "-y",
         "-i", path,
-        "-map", "0",
+        *_copy_stream_maps(),
         "-c", "copy",
         "-f", "segment",
         "-segment_time", str(segment_time),
@@ -215,7 +225,7 @@ def _extract_single_segment(
         "-ss", str(max(0.0, start_sec)),
         "-i", path,
         "-t", str(max(0.001, duration_sec)),
-        "-map", "0",
+        *_copy_stream_maps(),
         "-c", "copy",
         "-reset_timestamps", "1",
         output_path,
