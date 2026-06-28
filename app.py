@@ -41,7 +41,7 @@ from upload_provider import (
     resolve_split_mode,
 )
 from downloader import download_file, TransferCancelled
-from filester_upload import fetch_folder_map_from_api, load_upload_subfolder_blacklist
+from filester_upload import apply_folder_blacklist, fetch_folder_map_from_api
 from oshash_remote import fetch_oshash_from_url
 import goonbox_upload
 from queue_persist import track_add, track_remove
@@ -195,7 +195,7 @@ FILESTER_FOLDER_SYNC_INTERVAL_SEC = max(
     _env_int("FILESTER_FOLDER_SYNC_INTERVAL_SEC", 3600),
 )
 FILESTER_FOLDER_SYNC_INCLUDE_CHILDREN = _env_yes(
-    "FILESTER_FOLDER_SYNC_INCLUDE_CHILDREN", default="0"
+    "FILESTER_FOLDER_SYNC_INCLUDE_CHILDREN", default="1"
 )
 
 
@@ -337,9 +337,7 @@ def _sync_filester_folders_from_api(*, mode: str = "replace") -> dict:
     remote = fetch_folder_map_from_api(
         include_children=FILESTER_FOLDER_SYNC_INCLUDE_CHILDREN
     )
-    blacklist = load_upload_subfolder_blacklist()
-    if blacklist:
-        remote = {k: v for k, v in remote.items() if k not in blacklist}
+    remote = apply_folder_blacklist(remote)
     if mode == "merge":
         merged = dict(_load_filester_folders())
         merged.update(remote)
@@ -4958,11 +4956,12 @@ def _stashdb_post_upload_check(job_id, downloaded_path, *, parallel_with_upload:
 
 
 def _parallel_postprocess_runner(job_id: str, downloaded_path: str) -> None:
-    """Thumbnails + StashDB fingerprint match in this thread while GoFile upload runs.
+    """Sidecar thread: thumber → hasher/StashDB (sequential), parallel with upload.
 
-    Optional PHASH after a match is started in a separate thread so the upload
-    worker can join this thread, finalize the job, and show the BBCode helper
-    without waiting for PHASH.
+    Runs in a background thread while the main worker does split (if needed) and
+    upload. Thumber and hasher must not overlap — both are CPU/ffmpeg heavy.
+    Optional PHASH after a StashDB match runs in a third thread so finalize does
+    not wait for PHASH.
     """
     try:
         _run_thumber(job_id, downloaded_path, reset_logs=True, parallel_with_upload=True)
@@ -5009,7 +5008,7 @@ def _run_phash_followup_bg(job_id: str, downloaded_path: str) -> None:
 
 
 def _start_parallel_upload_sidecars(job_id: str, full_path: str) -> None:
-    """Background thread: thumbnails + StashDB match while GoFile upload runs.
+    """Background thread: thumber → hasher while the main thread uploads.
 
     If StashDB matches, optional PHASH for contribute runs in another thread so
     the upload worker can finalize (BBCode helper) without waiting for PHASH.
@@ -6173,7 +6172,7 @@ def _start_link_job(url, folder_id=None):
             is_video = _is_video_file(downloaded_path)
             if is_video:
                 jobs[job_id]["status_text"] = (
-                    f"Uploading {fname} (thumbnails → StashDB/hash alongside upload) → {folder_name}..."
+                    f"Uploading {fname} (thumbnails → hash alongside upload) → {folder_name}..."
                 )
                 _start_parallel_upload_sidecars(job_id, downloaded_path)
             else:
@@ -6293,20 +6292,6 @@ def _start_path_job(path, folder_id=None):
             if _is_cancelled(job_id):
                 return
 
-            if os.path.isdir(path):
-                # For directory uploads we don't bother running the StashDB
-                # check per file — the helper-link UX is single-file by design.
-                first_video = True
-                for root, _dirs, files in os.walk(path):
-                    for fname in sorted(files):
-                        fpath = os.path.join(root, fname)
-                        if not _is_video_file(fpath):
-                            continue
-                        _run_thumber(job_id, fpath, reset_logs=first_video)
-                        first_video = False
-                        if _is_cancelled(job_id):
-                            return
-
             jobs[job_id]["status"] = "uploading"
             jobs[job_id]["progress"] = None
             if os.path.isfile(path):
@@ -6315,7 +6300,7 @@ def _start_path_job(path, folder_id=None):
             if is_vid_file:
                 jobs[job_id]["status_text"] = (
                     f"Uploading {os.path.basename(path)} "
-                    f"(thumbnails → StashDB/hash alongside upload) → {folder_name}..."
+                    f"(thumbnails → hash alongside upload) → {folder_name}..."
                 )
                 _start_parallel_upload_sidecars(job_id, path)
             else:

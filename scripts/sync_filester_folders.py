@@ -67,6 +67,7 @@ def main() -> int:
     mode = "merge" if args.merge else "replace"
     try:
         remote = filester_upload.fetch_folder_map_from_api()
+        remote = filester_upload.apply_folder_blacklist(remote)
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

@@ -61,11 +61,13 @@ def sanitize_folder_name(name: str, *, max_len: int = _FOLDER_NAME_MAX) -> str:
     return s or "upload"
 
 
-def fetch_folder_map_from_api(*, include_children: bool = False) -> dict[str, str]:
+def fetch_folder_map_from_api(*, include_children: bool = True) -> dict[str, str]:
     """Download the account folder map from GET /api/v1/folders.
 
-    Default ``include_children=False`` syncs only top-level studio folders and
-    skips nested per-video split subfolders created under them.
+    Recurses the full tree by default so nested studio folders (e.g. under a
+    root VR container) are included. Callers should filter with
+    :func:`load_folder_blacklist` to drop split-upload subfolders and any
+    container folders you do not use as upload targets.
     """
     if not FILESTER_API_KEY:
         raise RuntimeError("FILESTER_API_KEY is not set")
@@ -93,8 +95,8 @@ def _blacklist_file_path() -> str:
     return ""
 
 
-def load_upload_subfolder_blacklist() -> set[str]:
-    """Folder ids created for split uploads — never promoted to studio map."""
+def load_folder_blacklist() -> set[str]:
+    """Folder ids excluded from filester-folders.json (split subfolders, containers, etc.)."""
     path = _blacklist_file_path()
     if not path:
         return set()
@@ -112,18 +114,51 @@ def load_upload_subfolder_blacklist() -> set[str]:
     return set()
 
 
-def record_upload_subfolder(folder_id: str) -> None:
+def load_upload_subfolder_blacklist() -> set[str]:
+    """Backward-compatible alias for :func:`load_folder_blacklist`."""
+    return load_folder_blacklist()
+
+
+def apply_folder_blacklist(folders: dict[str, str]) -> dict[str, str]:
+    """Return *folders* minus ids listed in the blacklist JSON."""
+    blacklist = load_folder_blacklist()
+    if not blacklist:
+        return folders
+    return {k: v for k, v in folders.items() if k not in blacklist}
+
+
+def record_upload_subfolder(folder_id: str, *, label: str = "") -> None:
     """Append a split-upload subfolder id to the blacklist JSON."""
     fid = (folder_id or "").strip()
     path = _blacklist_file_path()
     if not fid or not path:
         return
-    current = load_upload_subfolder_blacklist()
-    if fid in current:
+    current_ids = load_folder_blacklist()
+    if fid in current_ids:
         return
-    current.add(fid)
+    current_ids.add(fid)
+
+    notes: dict[str, str] = {}
+    if os.path.isfile(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                existing = json.load(f)
+            if isinstance(existing, dict):
+                raw_notes = existing.get("notes") or existing.get("labels") or {}
+                if isinstance(raw_notes, dict):
+                    notes = {str(k): str(v) for k, v in raw_notes.items()}
+        except (json.JSONDecodeError, OSError):
+            notes = {}
+
+    if label:
+        notes[fid] = label
+    elif fid not in notes:
+        notes[fid] = "split upload subfolder (auto)"
+
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    payload = {"folder_ids": sorted(current)}
+    payload: dict = {"folder_ids": sorted(current_ids)}
+    if notes:
+        payload["notes"] = {k: notes[k] for k in sorted(current_ids) if k in notes}
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, sort_keys=True)
