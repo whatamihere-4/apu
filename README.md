@@ -1,45 +1,34 @@
 # APU
 
-Upload workflow UI and sidecars (hasher, thumber, splitter). **All web traffic must go through Caddy** — the app and sidecar HTTP ports are not published to the host.
+Upload workflow UI and sidecars (hasher, thumber, splitter). **All web traffic must go through your existing Caddy container** — this stack does not publish any host ports.
 
 ## Quick start
 
-1. Copy `.env.example` to `.env` and fill in your settings.
-2. Create data directories if needed: `downloads/`, `thumbs/`, `cache/`.
-3. Start the stack:
+1. Ensure your Caddy stack is running and attached to the shared Docker network (default: `caddy_net`):
+
+```bash
+docker network create caddy_net   # skip if it already exists
+```
+
+2. Copy `.env.example` to `.env` and fill in your settings.
+3. Create data directories if needed: `downloads/`, `thumbs/`, `cache/`.
+4. Start the stack:
 
 ```bash
 docker compose up -d --build
 ```
 
-4. Open the site at `http://localhost` (or your `APU_DOMAIN`).
+5. Add or update a site block in **your** Caddy config (see below), then reload Caddy.
 
-Caddy is a required service in `docker-compose.yml`. Only Caddy binds host ports (`80`/`443` by default). The Flask app listens on `apu:5000` inside the Docker network and is not exposed directly.
+The `apu` container listens on port 5000 inside the Docker network only. Sidecars (`hasher-http`, `thumber-http`, `splitter-http`) are internal-only as well.
 
 ## Caddy configuration
 
-The default Caddyfile lives at `docker/caddy/Caddyfile`. Edit it for your domain, TLS, basic auth, or other Caddy features.
+This repo does **not** include a Caddy container or Caddyfile. Use your own.
 
-**Upstream container name:** always wire to `apu:5000` (the app container name on the Docker network).
+**Upstream container name:** wire to `apu:5000` on the shared network (`caddy_net` by default). Both Caddy and `apu` must be on that network.
 
-### Example: local HTTP
-
-```caddyfile
-localhost {
-	reverse_proxy apu:5000
-}
-```
-
-### Example: public hostname with automatic HTTPS
-
-Set in `.env`:
-
-```env
-APU_DOMAIN=apu.example.com
-ACME_EMAIL=you@example.com
-```
-
-Caddyfile (or use the bundled file — it reads `APU_DOMAIN` and `ACME_EMAIL` from the environment):
+### Example site block
 
 ```caddyfile
 apu.example.com {
@@ -47,44 +36,33 @@ apu.example.com {
 }
 ```
 
-### Example: use your own Caddyfile path
-
-Point `CADDYFILE` in `.env` at a file outside this repo:
-
-```env
-CADDYFILE=/path/to/my/Caddyfile
-```
-
-Your custom file should still reverse-proxy to `apu:5000`:
+### Example with basic auth
 
 ```caddyfile
 apu.example.com {
+	basicauth {
+		# bcrypt hash — generate with: caddy hash-password
+		you $2a$14$...
+	}
 	reverse_proxy apu:5000
 }
 ```
 
-After editing Caddy config, reload:
+After editing your Caddyfile, reload your Caddy container as you normally would, e.g.:
 
 ```bash
-docker compose exec caddy caddy reload --config /etc/caddy/Caddyfile
-```
-
-Or restart Caddy:
-
-```bash
-docker compose restart caddy
+docker exec caddy caddy reload --config /etc/caddy/Caddyfile
 ```
 
 ## Services
 
-| Service        | Role                         | Host exposure |
-|----------------|------------------------------|---------------|
-| `caddy`        | Reverse proxy (required)     | `80`, `443`   |
-| `apu`          | Flask web UI + upload jobs   | none          |
-| `hasher-http`  | OSHASH / MD5 / PHASH sidecar | none          |
-| `thumber-http` | Thumbnail generation         | none          |
-| `splitter-http`| Optional ffmpeg splitter     | none          |
-| `thumber`      | One-off CLI (`compose run`)  | none          |
+| Service         | Role                         | Host exposure |
+|-----------------|------------------------------|---------------|
+| `apu`           | Flask web UI + upload jobs   | none          |
+| `hasher-http`   | OSHASH / MD5 / PHASH sidecar | none          |
+| `thumber-http`  | Thumbnail generation         | none          |
+| `splitter-http` | Optional ffmpeg splitter     | none          |
+| `thumber`       | One-off CLI (`compose run`)  | none          |
 
 Internal sidecar URLs (container-to-container only) are set in `.env.example` under advanced wiring.
 
