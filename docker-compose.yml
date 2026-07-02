@@ -1,4 +1,23 @@
 services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: caddy
+    restart: unless-stopped
+    ports:
+      - "${CADDY_HTTP_PORT:-80}:80"
+      - "${CADDY_HTTPS_PORT:-443}:443"
+    environment:
+      APU_DOMAIN: ${APU_DOMAIN:-localhost}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    volumes:
+      - ${CADDYFILE:-./docker/caddy/Caddyfile}:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - app_net
+    depends_on:
+      - apu
+
   apu:
     build:
       context: .
@@ -131,5 +150,8 @@ services:
 
 networks:
   app_net:
-    external: true
-    name: ${MONOLITH_NETWORK:-caddy_net}
+    driver: bridge
+
+volumes:
+  caddy_data:
+  caddy_config:
