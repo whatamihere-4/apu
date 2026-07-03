@@ -160,9 +160,8 @@ def main() -> int:
 
     if ok:
         best = ok[0]["host"]
-        short = best.removesuffix(".download.real-debrid.com").removesuffix(".download.real-debrid.cloud")
         print(f"\nSuggested .env (fastest from this VPS):")
-        print(f"REAL_DEBRID_PREFERRED_CDN={short}")
+        print(f"REAL_DEBRID_PREFERRED_CDN={best}")
     else:
         print("\nNo host returned data. Try --hosts with nodes you know work.", file=sys.stderr)
         return 1
