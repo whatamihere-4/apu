@@ -104,6 +104,10 @@ def download_file(url, on_progress=None, should_cancel=None, on_log=None):
     max_attempts = max(1, _env_int("DOWNLOAD_RESUME_ATTEMPTS", 16))
     chunk_size = max(4096, _env_int("DOWNLOAD_CHUNK_SIZE", 65536))
 
+    from realdebrid import resolve_download_url
+
+    url = resolve_download_url(url, on_log=on_log)
+
     session = _make_session(identity_encoding=True)
 
     log(f"[DL] Requesting (resume up to {max_attempts} pass(es), identity encoding): {url}")

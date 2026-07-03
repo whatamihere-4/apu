@@ -6275,6 +6275,48 @@ def _start_link_job(url, folder_id=None):
     return job_id
 
 
+@app.route("/api/resolve_realdebrid", methods=["POST"])
+def api_resolve_realdebrid():
+    """Resolve a Real-Debrid panel link to the nearest CDN download URL."""
+    from realdebrid import (
+        RealDebridError,
+        is_cdn_link,
+        is_panel_link,
+        needs_resolution,
+        unrestrict_link,
+    )
+
+    data = request.get_json(silent=True) or {}
+    url = (data.get("url") or "").strip()
+    if not url:
+        return jsonify({"ok": False, "error": "url is required"}), 400
+
+    if is_cdn_link(url):
+        return jsonify({"ok": True, "url": url, "already_cdn": True, "resolved": False})
+
+    if not is_panel_link(url):
+        return jsonify({"ok": False, "error": "not a Real-Debrid panel link (real-debrid.com/d/…)"}), 400
+
+    if not needs_resolution(url):
+        return jsonify({"ok": True, "url": url, "resolved": False})
+
+    try:
+        payload = unrestrict_link(url)
+        download = (payload.get("download") or "").strip()
+        if not download:
+            return jsonify({"ok": False, "error": "Real-Debrid API returned no download URL"}), 502
+        return jsonify({
+            "ok": True,
+            "url": download,
+            "source_url": url,
+            "resolved": True,
+            "filename": (payload.get("filename") or "").strip(),
+            "filesize": payload.get("filesize"),
+        })
+    except RealDebridError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+
 @app.route("/api/submit_link", methods=["POST"])
 def api_submit_link():
     data = request.get_json()

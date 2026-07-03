@@ -261,6 +261,13 @@ def fetch_oshash_from_url(url: str, timeout: tuple[int, int] | None = None) -> d
     except OSHashRemoteError as e:
         return {"ok": False, "detail": str(e)}
 
+    from realdebrid import RealDebridError, resolve_download_url
+
+    try:
+        url = resolve_download_url(url)
+    except RealDebridError as e:
+        return {"ok": False, "detail": str(e)}
+
     session = requests.Session()
     session.headers.update(
         {
