@@ -170,33 +170,94 @@ def probe_session(
     }
 
 
+def _dedupe_bbcode_fragments(bb: str) -> str:
+    """GoonBox ``embed.bbcode`` sometimes repeats each tag twice — keep unique fragments."""
+    bb = re.sub(r"\s+", "", bb)
+    if not bb:
+        return bb
+
+    wrapped = re.compile(
+        r"\[url=([^\]]+)\]\[img\]([^\[]*)\[/img\]\[/url\]",
+        re.IGNORECASE,
+    )
+    parts: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for m in wrapped.finditer(bb):
+        key = (m.group(1).lower(), m.group(2).lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        parts.append(m.group(0))
+    if parts:
+        return "".join(parts)
+
+    img = re.compile(r"\[img\]([^\[]*)\[/img\]", re.IGNORECASE)
+    parts = []
+    seen_img: set[str] = set()
+    for m in img.finditer(bb):
+        key = m.group(1).lower()
+        if key in seen_img:
+            continue
+        seen_img.add(key)
+        parts.append(m.group(0))
+    if parts:
+        return "".join(parts)
+
+    half = len(bb) // 2
+    if half > 0 and bb[:half] == bb[half:]:
+        return bb[:half]
+    return bb
+
+
+def _urls_from_goonbox_response(raw: dict) -> tuple[str, str, str]:
+    """Return (page_url, img_url, direct_url) from a GoonBox upload JSON body."""
+    page = ""
+    medium = ""
+    direct = ""
+
+    embed = raw.get("embed")
+    if isinstance(embed, dict):
+        direct = (embed.get("direct") or embed.get("medium") or "").strip()
+        medium = (embed.get("medium") or direct).strip()
+        page = (embed.get("viewer") or embed.get("url") or embed.get("page") or "").strip()
+
+    image = raw.get("image")
+    if isinstance(image, dict):
+        if not direct:
+            direct = (image.get("original_url") or image.get("medium_url") or "").strip()
+        if not medium:
+            medium = (image.get("medium_url") or direct).strip()
+        if not page:
+            img_id = (image.get("encoded_id") or image.get("id") or "").strip()
+            if img_id:
+                page = f"{GOONBOX_BASE_URL}/img/{img_id}"
+
+    if not medium:
+        medium = direct
+    return page, medium, direct
+
+
 def bbcode_from_response(raw: dict) -> str:
     """Extract a single-line BBCode fragment from a GoonBox upload JSON body."""
     if not isinstance(raw, dict):
         raise RuntimeError(f"Unexpected GoonBox response: {raw!r}")
 
+    page, medium, direct = _urls_from_goonbox_response(raw)
+
+    if GOONBOX_BBCODE_SIMPLE:
+        url = direct or medium
+        if url:
+            return f"[IMG]{url}[/IMG]"
+    elif page and medium:
+        return f"[url={page}][img]{medium}[/img][/url]"
+    elif direct or medium:
+        return f"[IMG]{direct or medium}[/IMG]"
+
     embed = raw.get("embed")
     if isinstance(embed, dict):
-        if GOONBOX_BBCODE_SIMPLE:
-            direct = (embed.get("direct") or embed.get("medium") or "").strip()
-            if direct:
-                return f"[IMG]{direct}[/IMG]"
         bb = (embed.get("bbcode") or "").strip()
         if bb:
-            return re.sub(r"\s+", "", bb)
-
-    image = raw.get("image")
-    if isinstance(image, dict):
-        direct = (image.get("original_url") or image.get("medium_url") or "").strip()
-        if direct:
-            if GOONBOX_BBCODE_SIMPLE:
-                return f"[IMG]{direct}[/IMG]"
-            img_id = image.get("encoded_id") or image.get("id") or ""
-            medium = (image.get("medium_url") or direct).strip()
-            if img_id:
-                page = f"{GOONBOX_BASE_URL}/img/{img_id}"
-                return f"[url={page}][img]{medium}[/img][/url]"
-            return f"[IMG]{direct}[/IMG]"
+            return _dedupe_bbcode_fragments(bb)
 
     raise RuntimeError(f"GoonBox upload returned no embed/image URLs: {raw!r}")
 

@@ -8,6 +8,26 @@ from upload_common import format_size  # re-exported for backward compatibility
 
 
 GOFILE_API_KEY = os.environ.get("GOFILE_API_KEY", "")
+_PREFERRED_SERVER = (os.environ.get("GOFILE_PREFERRED_SERVER") or "").strip().lower()
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, str(default))
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+# Regional upload proxies from https://gofile.io/api (also benchmarked by speedtest script).
+REGIONAL_UPLOAD_HOSTS = (
+    "upload.gofile.io",
+    "upload-eu-par.gofile.io",
+    "upload-na-phx.gofile.io",
+    "upload-ap-sgp.gofile.io",
+    "upload-ap-hkg.gofile.io",
+    "upload-ap-tyo.gofile.io",
+    "upload-sa-sao.gofile.io",
+)
 
 
 def _auth_headers():
@@ -70,6 +90,60 @@ def get_upload_servers():
     return [s["name"] for s in servers if s.get("name")]
 
 
+def upload_host(server: str) -> str:
+    """Normalize API server name or full hostname to ``host.gofile.io``."""
+    s = (server or "").strip().lower()
+    if not s:
+        return ""
+    if s.endswith(".gofile.io"):
+        return s
+    if "." in s:
+        return s
+    return f"{s}.gofile.io"
+
+
+def upload_url(server: str) -> str:
+    return f"https://{upload_host(server)}/uploadfile"
+
+
+def preferred_upload_server() -> str:
+    return _PREFERRED_SERVER
+
+
+def order_upload_servers(servers: list[str]) -> list[str]:
+    """Preferred server first; preserve API order for the rest."""
+    pref = preferred_upload_server()
+    seen: set[str] = set()
+    ordered: list[str] = []
+
+    def add(name: str) -> None:
+        key = upload_host(name)
+        if not key or key in seen:
+            return
+        seen.add(key)
+        ordered.append(name.strip())
+
+    if pref:
+        add(pref)
+    for name in servers:
+        add(name)
+    return ordered
+
+
+def get_ordered_upload_servers(*, include_regional: bool = False) -> list[str]:
+    """Upload servers from API, optionally merged with regional proxies, preferred first."""
+    api = get_upload_servers()
+    extra = list(REGIONAL_UPLOAD_HOSTS) if include_regional else []
+    merged: list[str] = []
+    seen: set[str] = set()
+    for name in api + extra:
+        key = upload_host(name)
+        if key and key not in seen:
+            seen.add(key)
+            merged.append(name)
+    return order_upload_servers(merged)
+
+
 def upload_file(filepath, folder_id=None, on_progress=None, should_cancel=None):
     """Upload a single file to GoFile with progress logging to stdout.
 
@@ -80,11 +154,15 @@ def upload_file(filepath, folder_id=None, on_progress=None, should_cancel=None):
     """
     filename = os.path.basename(filepath)
     filesize = os.path.getsize(filepath)
-    servers = get_upload_servers()
-    print(
-        f"[UPLOAD] {filename} ({format_size(filesize)}) -> trying {len(servers)} server(s)",
-        flush=True,
-    )
+    servers = get_ordered_upload_servers()
+    pref = preferred_upload_server()
+    if pref:
+        print(f"[UPLOAD] {filename} ({format_size(filesize)}) -> preferred {upload_host(pref)}", flush=True)
+    else:
+        print(
+            f"[UPLOAD] {filename} ({format_size(filesize)}) -> trying {len(servers)} server(s)",
+            flush=True,
+        )
 
     last_log = [0.0]
     start_time = [time.time()]
@@ -112,11 +190,12 @@ def upload_file(filepath, folder_id=None, on_progress=None, should_cancel=None):
             on_progress(pct, uploaded, monitor.len, speed, remaining)
 
     last_err = None
+    max_attempts = max(5, _env_int("GOFILE_UPLOAD_SERVER_ATTEMPTS", 5))
     # Upload nodes can occasionally throw transient 5xx. Try a few nodes before failing.
-    for attempt, server in enumerate(servers[:5], start=1):
+    for attempt, server in enumerate(servers[:max_attempts], start=1):
         if should_cancel and should_cancel():
             raise TransferCancelled("Upload cancelled")
-        url = f"https://{server}.gofile.io/uploadfile"
+        url = upload_url(server)
         print(f"[UPLOAD] attempt {attempt}: POST {url}", flush=True)
         try:
             with open(filepath, "rb") as fp:

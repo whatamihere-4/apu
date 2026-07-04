@@ -1666,9 +1666,11 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]`;
         if (!bb) return;
         const el = document.getElementById("image-bbcode");
         if (!el) return;
-        const merged = el.value ? el.value + " " + bb : bb;
-        const sanitized = sanitizeImageBbcodeInput(merged);
-        el.value = sanitized;
+        const current = sanitizeImageBbcodeInput(el.value);
+        const cleaned = sanitizeImageBbcodeInput(bb);
+        if (current && current.includes(cleaned)) return;
+        const merged = current ? current + " " + cleaned : cleaned;
+        el.value = sanitizeImageBbcodeInput(merged);
         composeBbcode();
       }
 
