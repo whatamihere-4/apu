@@ -135,7 +135,7 @@ def main() -> int:
         )
         return 1
 
-    print("At least one method succeeded — use that in .env for GOONBOX_AUTO_UPLOAD.")
+    print("At least one method succeeded — server-side upload is no longer used by APU; use the Upload images button on /bbcode.")
     return 0
 
 

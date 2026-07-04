@@ -447,8 +447,23 @@ def upload_bytes(
             "GoonBox CSRF/session expired (419) — refresh GOONBOX_SESSION and GOONBOX_XSRF_TOKEN from the browser"
         )
     if r.status_code == 413:
-        raise RuntimeError("File exceeds GoonBox upload size limit")
-    r.raise_for_status()
+        raise RuntimeError("File exceeds GoonBox upload size limit (25 MB)")
+
+    if not r.ok:
+        detail = ""
+        try:
+            err_body = r.json()
+            if isinstance(err_body, dict):
+                detail = str(
+                    err_body.get("message") or err_body.get("error") or err_body.get("detail") or ""
+                ).strip()
+        except ValueError:
+            detail = (r.text or "").strip()[:300]
+        msg = f"GoonBox upload HTTP {r.status_code}"
+        if detail:
+            msg = f"{msg}: {detail}"
+        raise RuntimeError(msg)
+
     body = r.json()
     if not isinstance(body, dict):
         raise RuntimeError(f"Unexpected GoonBox response: {body!r}")

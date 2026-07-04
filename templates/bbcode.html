@@ -302,39 +302,12 @@
             <button
               type="button"
               class="btn secondary"
-              id="goonbox-server-upload-btn"
-              title="Upload StashDB cover, thumbnail sheet, and SLR preview GIF to GoonBox (server-side)"
-              {% if not goonbox_configured %}disabled{% endif %}
-            >
-              Upload to GoonBox (auto)
-            </button>
-            <button
-              type="button"
-              class="btn secondary"
               id="goonbox-upload-btn"
-              title="Open GoonBox uploader popup and append BBCode into the Image Embed field"
+              title="Open GoonBox uploader and append BBCode into the Image Embed field"
             >
-              Upload images (GoonBox popup)
+              Upload images
             </button>
-            <a
-              id="goonbox-open-upload"
-              class="btn secondary"
-              href="{{ goonbox_base_url }}/upload"
-              target="_blank"
-              rel="noopener"
-              title="Fallback: open GoonBox upload page directly"
-            >
-              Open GoonBox upload
-            </a>
           </div>
-          <p id="goonbox-upload-status" style="margin:0.35rem 0 0;font-size:12px;opacity:0.85;">
-            {% if goonbox_configured %}
-            Server upload uses session cookies or a Bearer token (see .env). Order is always cover → thumbs → GIF, concatenated with no spaces.
-            {% if goonbox_auto_upload %} Auto-upload runs after a StashDB scene is loaded.{% endif %}
-            {% else %}
-            Set <code>GOONBOX_SESSION</code> + <code>GOONBOX_XSRF_TOKEN</code> (or <code>GOONBOX_AUTH_TOKEN</code>) in .env — run <code>scripts/test_goonbox_auth.py</code> to verify.
-            {% endif %}
-          </p>
         </div>
 
         <div class="field">
@@ -390,8 +363,6 @@
       gofileEnabled: {{ gofile_enabled|tojson }},
       filesterEnabled: {{ filester_enabled|tojson }},
       goonboxBaseUrl: {{ goonbox_base_url|tojson }},
-      goonboxConfigured: {{ goonbox_configured|tojson }},
-      goonboxAutoUpload: {{ goonbox_auto_upload|tojson }},
       stashdbScenesBase: {{ stashdb_scenes_base|tojson }},
     };
     let activeFilename = (PAGE_DATA.filename || "").trim();
@@ -432,9 +403,6 @@
     const cachedFileHintEl = document.getElementById("cached-file-hint");
     const stashdbAutofillBtn = document.getElementById("stashdb-autofill-btn");
     const stashdbStatusEl = document.getElementById("stashdb-status");
-    const goonboxServerUploadBtn = document.getElementById("goonbox-server-upload-btn");
-    const goonboxUploadStatusEl = document.getElementById("goonbox-upload-status");
-    let goonboxUploadBusy = false;
 
     const fieldIds = [
       "title", "resolution", "upload-date", "studio",
@@ -1088,71 +1056,6 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]`;
       downloadBothBtn.disabled = false;
     }
 
-    function setGoonboxUploadStatus(text, kind) {
-      if (!goonboxUploadStatusEl) return;
-      goonboxUploadStatusEl.className = kind === "err" ? "err" : kind === "ok" ? "ok" : "";
-      goonboxUploadStatusEl.textContent = text;
-    }
-
-    async function uploadBbcodeImagesToGoonbox(opts = {}) {
-      const silent = !!opts.silent;
-      if (!PAGE_DATA.goonboxConfigured) {
-        if (!silent) setGoonboxUploadStatus("GoonBox auth is not configured on the server.", "err");
-        return false;
-      }
-      if (!activeSceneId) {
-        if (!silent) setGoonboxUploadStatus("Load a StashDB scene first.", "err");
-        return false;
-      }
-      if (goonboxUploadBusy) return false;
-      goonboxUploadBusy = true;
-      if (goonboxServerUploadBtn) goonboxServerUploadBtn.disabled = true;
-      if (!silent) setGoonboxUploadStatus("Uploading cover, thumbs, and GIF to GoonBox…", "");
-      try {
-        const body = {
-          scene_id: activeSceneId,
-          filename: activeFilename || undefined,
-          slr_code: slrPreviewCode || undefined,
-        };
-        const r = await fetch("/api/bbcode_goonbox_upload", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        });
-        const data = await r.json();
-        if (!r.ok || data.error) throw new Error(data.error || `HTTP ${r.status}`);
-        const imageBbcodeEl = fields["image-bbcode"];
-        imageBbcodeEl.value = sanitizeImageBbcodeInput(data.image_bbcode || "");
-        composeBbcode();
-        const skipped = Array.isArray(data.skipped) ? data.skipped : [];
-        const parts = Array.isArray(data.parts) ? data.parts : [];
-        let note = `Uploaded ${parts.length} image(s) to GoonBox.`;
-        if (skipped.length) {
-          const reasons = skipped.map((s) => `${s.kind}: ${s.reason}`).join("; ");
-          note += ` Skipped: ${reasons}.`;
-        }
-        setGoonboxUploadStatus(note, skipped.length && !parts.length ? "err" : "ok");
-        if (!silent) {
-          helperStatusEl.className = "ok";
-          helperStatusEl.textContent = "GoonBox upload complete.";
-        }
-        return true;
-      } catch (err) {
-        const msg = err.message || String(err);
-        setGoonboxUploadStatus("GoonBox upload failed: " + msg, "err");
-        if (!silent) {
-          helperStatusEl.className = "err";
-          helperStatusEl.textContent = "GoonBox upload failed.";
-        }
-        return false;
-      } finally {
-        goonboxUploadBusy = false;
-        if (goonboxServerUploadBtn && PAGE_DATA.goonboxConfigured) {
-          goonboxServerUploadBtn.disabled = false;
-        }
-      }
-    }
-
     async function loadScene() {
       if (!activeSceneId) {
         sceneMetaEl.innerHTML =
@@ -1215,9 +1118,6 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]`;
         }
 
         composeBbcode();
-        if (PAGE_DATA.goonboxAutoUpload && PAGE_DATA.goonboxConfigured) {
-          await uploadBbcodeImagesToGoonbox({ silent: true });
-        }
         helperStatusEl.className = "ok";
         helperStatusEl.textContent = "Scene loaded.";
       } catch (err) {
@@ -1479,10 +1379,7 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]`;
         if (isGofileOn() && data.gallery_link && !fields["gallery-link"].value.trim()) {
           fields["gallery-link"].value = data.gallery_link;
         }
-        if (
-          data.image_bbcode &&
-          !(PAGE_DATA.goonboxAutoUpload && PAGE_DATA.goonboxConfigured)
-        ) {
+        if (data.image_bbcode) {
           fields["image-bbcode"].value = sanitizeImageBbcodeInput(data.image_bbcode);
         }
         if (data.scene_url) stashdbLinkEl.value = data.scene_url;
@@ -1554,11 +1451,6 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]`;
       }
     });
     stashdbAutofillBtn.addEventListener("click", () => { void autofillFromStashdb(); });
-    if (goonboxServerUploadBtn) {
-      goonboxServerUploadBtn.addEventListener("click", () => {
-        void uploadBbcodeImagesToGoonbox();
-      });
-    }
     fieldIds.forEach((id) => fields[id].addEventListener("input", composeBbcode));
     imageNextBtn.addEventListener("click", () => showSceneImage(imageIndex + 1));
 

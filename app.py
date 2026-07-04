@@ -49,7 +49,6 @@ from filester_upload import (
     rename_split_upload_folder_for_stashdb,
 )
 from oshash_remote import fetch_oshash_from_url
-import goonbox_upload
 from queue_persist import track_add, track_remove
 from queue_api import register_queue_routes
 
@@ -206,11 +205,12 @@ FILESTER_FOLDER_SYNC_INCLUDE_CHILDREN = _env_yes(
 
 
 GOONBOX_BASE_URL = (os.environ.get("GOONBOX_BASE_URL") or "https://goonbox.cr").rstrip("/")
-GOONBOX_AUTO_UPLOAD = _env_yes("GOONBOX_AUTO_UPLOAD", default="0")
 SLR_GIF_FPS = _env_int("SLR_GIF_FPS", 12)
 SLR_GIF_WIDTH = _env_int("SLR_GIF_WIDTH", 480)
 SLR_GIF_MAX_DURATION = _env_int("SLR_GIF_MAX_DURATION", 15)
 SLR_GIF_MAX_BYTES = _env_int("SLR_GIF_MAX_BYTES", 26_214_400)
+# GoonBox animated cap (width × height × frames); matches GET /api/upload/config.
+SLR_GIF_MAX_ANIMATED_PIXELS = _env_int("SLR_GIF_MAX_ANIMATED_PIXELS", 50_000_000)
 JOB_LINKS_FILENAME_ONLY = _env_yes("JOB_LINKS_FILENAME_ONLY", default="0")
 HASHER_ALGORITHMS = ("OSHASH", "MD5", "PHASH")
 
@@ -1762,8 +1762,6 @@ def bbcode_page():
         filester_split_mode=FILESTER_SPLIT_MODE,
         stashdb_scenes_base=STASHDB_SCENES_BASE,
         goonbox_base_url=GOONBOX_BASE_URL,
-        goonbox_configured=goonbox_upload.configured(),
-        goonbox_auto_upload=GOONBOX_AUTO_UPLOAD,
     )
 
 
@@ -5504,6 +5502,134 @@ def _thumb_sheet_png_bytes(video_key: str) -> bytes | None:
         return fp.read()
 
 
+def _which_ffprobe() -> str | None:
+    path = shutil.which("ffprobe")
+    return path if path else None
+
+
+def _ffprobe_video_size(path: str) -> tuple[int, int]:
+    """Return (width, height) of the first video stream, or (0, 0) on failure."""
+    ffprobe = _which_ffprobe()
+    if not ffprobe or not os.path.isfile(path):
+        return 0, 0
+    try:
+        proc = subprocess.run(
+            [
+                ffprobe,
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=width,height",
+                "-of",
+                "json",
+                path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        if proc.returncode != 0:
+            return 0, 0
+        data = json.loads(proc.stdout or "{}")
+        streams = data.get("streams") or []
+        if not streams:
+            return 0, 0
+        w = int(streams[0].get("width") or 0)
+        h = int(streams[0].get("height") or 0)
+        return w, h
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return 0, 0
+
+
+def _ffprobe_gif_animated_pixels(path: str) -> tuple[int, int, int, int]:
+    """Return (width, height, frame_count, width*height*frames) for a GIF."""
+    ffprobe = _which_ffprobe()
+    if not ffprobe or not os.path.isfile(path):
+        return 0, 0, 0, 0
+    try:
+        proc = subprocess.run(
+            [
+                ffprobe,
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-count_frames",
+                "-show_entries",
+                "stream=width,height,nb_read_frames",
+                "-of",
+                "json",
+                path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        if proc.returncode != 0:
+            return 0, 0, 0, 0
+        data = json.loads(proc.stdout or "{}")
+        streams = data.get("streams") or []
+        if not streams:
+            return 0, 0, 0, 0
+        st = streams[0]
+        w = int(st.get("width") or 0)
+        h = int(st.get("height") or 0)
+        frames = int(st.get("nb_read_frames") or 0)
+        total = w * h * frames if w > 0 and h > 0 and frames > 0 else 0
+        return w, h, frames, total
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return 0, 0, 0, 0
+
+
+def _slr_gif_animated_pixels(width: int, height: int, fps: int, duration: int) -> int:
+    frames = max(1, fps) * max(1, duration)
+    return max(1, width) * max(1, height) * frames
+
+
+def _clamp_slr_gif_params(
+    src_w: int,
+    src_h: int,
+    fps: int,
+    width: int,
+    duration: int,
+    *,
+    max_pixels: int,
+) -> tuple[int, int, int, int]:
+    """Fit SLR GIF encode params under GoonBox animated pixel cap (W×H×frames)."""
+    fps = max(1, min(fps, 60))
+    width = max(120, min(width, 1920))
+    duration = max(1, min(duration, 60))
+
+    if src_w <= 0 or src_h <= 0:
+        out_h = width
+    else:
+        out_h = max(1, int(round(width * src_h / src_w)))
+
+    def total(w: int, d: int, f: int) -> int:
+        h = max(1, int(round(w * src_h / src_w))) if src_w > 0 and src_h > 0 else w
+        return _slr_gif_animated_pixels(w, h, f, d)
+
+    while total(width, duration, fps) > max_pixels and duration > 3:
+        duration -= 1
+    while total(width, duration, fps) > max_pixels and fps > 6:
+        fps -= 1
+    while total(width, duration, fps) > max_pixels and width > 240:
+        width -= 40
+
+    if total(width, duration, fps) > max_pixels and src_w > 0 and src_h > 0:
+        frames = max(1, fps * duration)
+        aspect = src_h / src_w
+        w_cap = int((max_pixels / (aspect * frames)) ** 0.5)
+        width = max(120, min(width, w_cap))
+
+    out_h = max(1, int(round(width * src_h / src_w))) if src_w > 0 and src_h > 0 else width
+    return fps, width, duration, out_h
+
+
 def _slr_preview_gif_bytes(code: str) -> bytes:
     if not re.fullmatch(r"\d{4,10}", code):
         raise ValueError("Missing or invalid SLR scene code (4-10 digits)")
@@ -5542,9 +5668,31 @@ def _slr_preview_gif_bytes(code: str) -> bytes:
     gif_path = tmp_gif.name
     tmp_mp4.close()
     tmp_gif.close()
+    gif_bytes = b""
+    gw = gh = gframes = gtotal = 0
     try:
         with open(mp4_path, "wb") as f:
             f.write(mp4_data)
+
+        src_w, src_h = _ffprobe_video_size(mp4_path)
+        req_fps, req_w, req_d = fps, width, duration
+        fps, width, duration, out_h = _clamp_slr_gif_params(
+            src_w,
+            src_h,
+            fps,
+            width,
+            duration,
+            max_pixels=SLR_GIF_MAX_ANIMATED_PIXELS,
+        )
+        est_pixels = _slr_gif_animated_pixels(width, out_h, fps, duration)
+        if (fps, width, duration) != (req_fps, req_w, req_d):
+            print(
+                f"[SLR-GIF] Clamped for GoonBox animated cap ({SLR_GIF_MAX_ANIMATED_PIXELS:,} px): "
+                f"{req_w}px@{req_fps}fps×{req_d}s → {width}px@{fps}fps×{duration}s "
+                f"(~{est_pixels:,} px, {out_h}px tall)",
+                flush=True,
+            )
+
         vf = (
             f"fps={fps},scale={width}:-1:flags=lanczos,"
             "split[s0][s1];[s0]palettegen=max_colors=128[p];"
@@ -5577,6 +5725,7 @@ def _slr_preview_gif_bytes(code: str) -> bytes:
             raise RuntimeError(f"ffmpeg failed ({proc.returncode}): {tail or 'no stderr'}")
         with open(gif_path, "rb") as gf:
             gif_bytes = gf.read()
+        gw, gh, gframes, gtotal = _ffprobe_gif_animated_pixels(gif_path)
     finally:
         for pth in (mp4_path, gif_path):
             try:
@@ -5591,101 +5740,20 @@ def _slr_preview_gif_bytes(code: str) -> bytes:
             f"GIF is {len(gif_bytes):,} bytes (limit {SLR_GIF_MAX_BYTES:,}). "
             f"Lower SLR_GIF_WIDTH / SLR_GIF_FPS / SLR_GIF_MAX_DURATION."
         )
+
+    if gtotal > SLR_GIF_MAX_ANIMATED_PIXELS:
+        raise RuntimeError(
+            f"GIF is {gtotal:,} animated pixels ({gw}×{gh}×{gframes} frames) — "
+            f"GoonBox limit is {SLR_GIF_MAX_ANIMATED_PIXELS:,} (width×height×frames). "
+            f"Lower SLR_GIF_WIDTH / SLR_GIF_FPS / SLR_GIF_MAX_DURATION."
+        )
+    if gtotal > 0:
+        print(
+            f"[SLR-GIF] {gw}×{gh}, {gframes} frames, {len(gif_bytes):,} bytes, "
+            f"{gtotal:,} animated px",
+            flush=True,
+        )
     return gif_bytes
-
-
-@app.route("/api/bbcode_goonbox_upload", methods=["POST"])
-def api_bbcode_goonbox_upload():
-    """Upload cover + thumb sheet + SLR GIF to GoonBox; return concatenated BBCode.
-
-    Body JSON:
-      scene_id (required)
-      filename (optional — thumb sheet basename under /downloads)
-      image_index (optional, default 0)
-      slr_code (optional — extracted from scene URLs when omitted)
-      include_thumbs (optional, default true)
-      include_gif (optional, default true when slr_code resolvable)
-    """
-    if not goonbox_upload.configured():
-        return jsonify({
-            "error": "GoonBox auth not configured — set GOONBOX_AUTH_TOKEN or GOONBOX_SESSION + GOONBOX_XSRF_TOKEN",
-        }), 400
-    data = request.get_json(silent=True) or {}
-    scene_id = (data.get("scene_id") or "").strip()
-    if not scene_id:
-        return jsonify({"error": "scene_id is required"}), 400
-    filename = (data.get("filename") or "").strip()
-    try:
-        image_index = int(data.get("image_index", 0))
-    except (TypeError, ValueError):
-        return jsonify({"error": "image_index must be an integer"}), 400
-    slr_code = (data.get("slr_code") or "").strip()
-    include_thumbs = data.get("include_thumbs", True) is not False
-    include_gif = data.get("include_gif", True) is not False
-
-    parts: list[dict] = []
-    skipped: list[dict] = []
-    bbcode_chunks: list[str] = []
-
-    try:
-        cover_bytes = _stashdb_scene_cover_png_bytes(scene_id, image_index)
-        cover_name = f"stashdb_{scene_id}_{image_index}.png"
-        cover_resp = goonbox_upload.upload_bytes(cover_bytes, cover_name, content_type="image/png")
-        cover_bb = cover_resp["bbcode"]
-        parts.append({"kind": "cover", "bbcode": cover_bb, "filename": cover_name})
-        bbcode_chunks.append(cover_bb)
-    except Exception as e:  # noqa: BLE001
-        return jsonify({"error": f"Cover upload failed: {e}"}), 502
-
-    if include_thumbs and filename:
-        try:
-            thumb_bytes = _thumb_sheet_png_bytes(filename)
-            if thumb_bytes:
-                thumb_name = _thumb_sheet_basename(filename)
-                thumb_resp = goonbox_upload.upload_bytes(
-                    thumb_bytes, os.path.basename(thumb_name), content_type="image/png"
-                )
-                thumb_bb = thumb_resp["bbcode"]
-                parts.append({"kind": "thumbs", "bbcode": thumb_bb, "filename": thumb_name})
-                bbcode_chunks.append(thumb_bb)
-            else:
-                skipped.append({"kind": "thumbs", "reason": "thumbnail_sheet_not_found"})
-        except Exception as e:  # noqa: BLE001
-            skipped.append({"kind": "thumbs", "reason": str(e)})
-    elif include_thumbs and not filename:
-        skipped.append({"kind": "thumbs", "reason": "no_filename_for_thumb_sheet"})
-
-    if include_gif:
-        if not slr_code:
-            try:
-                raw = _stashdb_scene_full_query(scene_id)
-                for url_row in (raw or {}).get("urls") or []:
-                    u = (url_row.get("url") if isinstance(url_row, dict) else url_row) or ""
-                    slr_code = _extract_slr_scene_code(str(u)) or ""
-                    if slr_code:
-                        break
-            except Exception:  # noqa: BLE001
-                slr_code = ""
-        if slr_code:
-            try:
-                gif_bytes = _slr_preview_gif_bytes(slr_code)
-                gif_name = f"slr_preview_{slr_code}.gif"
-                gif_resp = goonbox_upload.upload_bytes(gif_bytes, gif_name, content_type="image/gif")
-                gif_bb = gif_resp["bbcode"]
-                parts.append({"kind": "gif", "bbcode": gif_bb, "filename": gif_name})
-                bbcode_chunks.append(gif_bb)
-            except Exception as e:  # noqa: BLE001
-                skipped.append({"kind": "gif", "reason": str(e)})
-        else:
-            skipped.append({"kind": "gif", "reason": "no_slr_scene_code"})
-
-    image_bbcode = "".join(bbcode_chunks)
-    return jsonify({
-        "ok": True,
-        "image_bbcode": image_bbcode,
-        "parts": parts,
-        "skipped": skipped,
-    })
 
 
 def _extract_slr_scene_code(url: str) -> str | None:
