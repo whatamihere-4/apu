@@ -22,12 +22,6 @@ import argparse
 import os
 import re
 import sys
-import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from io import BytesIO
-
-import requests
-from requests_toolbelt import MultipartEncoder
 
 APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PY_DIR = os.path.join(APP_DIR, "py")
@@ -49,63 +43,6 @@ def _load_dotenv() -> None:
             val = val.strip().strip('"').strip("'")
             if key and key not in os.environ:
                 os.environ[key] = val
-
-
-def _mbps(bytes_sent: int, elapsed: float) -> float:
-    if elapsed <= 0 or bytes_sent <= 0:
-        return 0.0
-    return (bytes_sent * 8) / elapsed / 1_000_000
-
-
-def _probe_server(server: str, payload: bytes, connect_to: float, read_to: float) -> dict:
-    import gofile_upload
-
-    host = gofile_upload.upload_host(server)
-    url = gofile_upload.upload_url(server)
-    headers = gofile_upload._auth_headers()
-    fields = {
-        "file": ("apu_speedtest.bin", BytesIO(payload), "application/octet-stream"),
-    }
-    encoder = MultipartEncoder(fields=fields)
-    headers["Content-Type"] = encoder.content_type
-
-    started = time.monotonic()
-    try:
-        r = requests.post(url, data=encoder, headers=headers, timeout=(connect_to, read_to))
-    except requests.RequestException as e:
-        return {"host": host, "server": server, "ok": False, "error": str(e)[:140]}
-
-    elapsed = time.monotonic() - started
-    if r.status_code >= 400:
-        snippet = (r.text or "")[:120]
-        return {
-            "host": host,
-            "server": server,
-            "ok": False,
-            "error": f"HTTP {r.status_code}: {snippet}",
-        }
-
-    try:
-        body = r.json()
-    except ValueError:
-        body = {}
-    if body.get("status") != "ok":
-        return {
-            "host": host,
-            "server": server,
-            "ok": False,
-            "error": str(body.get("status") or body)[:140],
-        }
-
-    return {
-        "host": host,
-        "server": server,
-        "ok": True,
-        "mbps": _mbps(len(payload), elapsed),
-        "mib_s": len(payload) / elapsed / (1024 * 1024),
-        "seconds": round(elapsed, 2),
-        "bytes": len(payload),
-    }
 
 
 def main() -> int:
@@ -144,17 +81,17 @@ def main() -> int:
             return 1
         server_labels = merged
 
-    # Dedupe by host while preserving first label
-    seen: set[str] = set()
-    pairs: list[tuple[str, str]] = []
-    for label, host in zip(server_labels, servers):
+    # Dedupe by normalized host to avoid repeated probes of the same node.
+    unique_hosts: set[str] = set()
+    unique_labels: list[str] = []
+    for label in server_labels:
         h = gofile_upload.upload_host(label)
-        if h in seen:
+        if not h or h in unique_hosts:
             continue
-        seen.add(h)
-        pairs.append((label, h))
+        unique_hosts.add(h)
+        unique_labels.append(label)
 
-    if not pairs:
+    if not unique_labels:
         print("No servers to test.", file=sys.stderr)
         return 1
 
@@ -163,24 +100,17 @@ def main() -> int:
     mib = probe_bytes / (1024 * 1024)
 
     print(
-        f"Uploading {mib:.1f} MiB probe to {len(pairs)} server(s) "
+        f"Uploading {mib:.1f} MiB probe to {len(unique_labels)} server(s) "
         f"({args.workers} workers)…\n"
     )
 
-    results: list[dict] = []
-    with ThreadPoolExecutor(max_workers=max(1, args.workers)) as pool:
-        futs = {
-            pool.submit(
-                _probe_server,
-                label,
-                payload,
-                args.connect_timeout,
-                args.read_timeout,
-            ): label
-            for label, _host in pairs
-        }
-        for fut in as_completed(futs):
-            results.append(fut.result())
+    results = gofile_upload.benchmark_servers(
+        unique_labels,
+        payload=payload,
+        connect_to=args.connect_timeout,
+        read_to=args.read_timeout,
+        workers=args.workers,
+    )
 
     ok = [r for r in results if r.get("ok")]
     fail = [r for r in results if not r.get("ok")]

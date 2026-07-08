@@ -1,5 +1,8 @@
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from io import BytesIO
+
 import requests
 from requests_toolbelt import MultipartEncoder, MultipartEncoderMonitor
 
@@ -9,6 +12,7 @@ from upload_common import format_size  # re-exported for backward compatibility
 
 GOFILE_API_KEY = os.environ.get("GOFILE_API_KEY", "")
 _PREFERRED_SERVER = (os.environ.get("GOFILE_PREFERRED_SERVER") or "").strip().lower()
+_RUNTIME_PREFERRED_SERVER = ""
 
 
 def _env_int(name: str, default: int) -> int:
@@ -107,7 +111,15 @@ def upload_url(server: str) -> str:
 
 
 def preferred_upload_server() -> str:
-    return _PREFERRED_SERVER
+    # Prefer env pin first; allow runtime override (background scan) to adjust
+    # without restarting the service.
+    return _PREFERRED_SERVER or _RUNTIME_PREFERRED_SERVER
+
+
+def set_runtime_preferred_server(server: str) -> None:
+    """Set preferred server for this process (used by background scan)."""
+    global _RUNTIME_PREFERRED_SERVER
+    _RUNTIME_PREFERRED_SERVER = (server or "").strip().lower()
 
 
 def order_upload_servers(servers: list[str]) -> list[str]:
@@ -142,6 +154,108 @@ def get_ordered_upload_servers(*, include_regional: bool = False) -> list[str]:
             seen.add(key)
             merged.append(name)
     return order_upload_servers(merged)
+
+
+def _mbps(bytes_sent: int, elapsed: float) -> float:
+    if elapsed <= 0 or bytes_sent <= 0:
+        return 0.0
+    return (bytes_sent * 8) / elapsed / 1_000_000
+
+
+def probe_server(server: str, payload: bytes, *, connect_to: float, read_to: float) -> dict:
+    """Probe a single GoFile upload server (creates a tiny guest upload)."""
+    host = upload_host(server)
+    url = upload_url(server)
+    headers = _auth_headers()
+    fields = {
+        "file": ("apu_speedtest.bin", BytesIO(payload), "application/octet-stream"),
+    }
+    encoder = MultipartEncoder(fields=fields)
+    headers["Content-Type"] = encoder.content_type
+
+    started = time.monotonic()
+    try:
+        r = requests.post(url, data=encoder, headers=headers, timeout=(connect_to, read_to))
+    except requests.RequestException as e:
+        elapsed = time.monotonic() - started
+        return {
+            "host": host,
+            "server": server,
+            "ok": False,
+            "error": str(e)[:140],
+            "seconds": round(elapsed, 2),
+        }
+
+    elapsed = time.monotonic() - started
+    if r.status_code >= 400:
+        snippet = (r.text or "")[:120]
+        return {
+            "host": host,
+            "server": server,
+            "ok": False,
+            "error": f"HTTP {r.status_code}: {snippet}",
+            "seconds": round(elapsed, 2),
+        }
+
+    try:
+        body = r.json()
+    except ValueError:
+        body = {}
+    if body.get("status") != "ok":
+        return {
+            "host": host,
+            "server": server,
+            "ok": False,
+            "error": str(body.get("status") or body)[:140],
+            "seconds": round(elapsed, 2),
+        }
+
+    return {
+        "host": host,
+        "server": server,
+        "ok": True,
+        "mbps": _mbps(len(payload), elapsed),
+        "mib_s": len(payload) / elapsed / (1024 * 1024),
+        "seconds": round(elapsed, 2),
+        "bytes": len(payload),
+    }
+
+
+def benchmark_servers(
+    servers: list[str],
+    *,
+    payload: bytes,
+    connect_to: float,
+    read_to: float,
+    workers: int,
+) -> list[dict]:
+    """Benchmark GoFile upload servers by uploading an in-memory probe."""
+    # Dedupe by normalized host while preserving first label.
+    seen: set[str] = set()
+    labels: list[str] = []
+    for s in servers:
+        h = upload_host(s)
+        if not h or h in seen:
+            continue
+        seen.add(h)
+        labels.append(s.strip())
+
+    if not labels:
+        return []
+
+    results: list[dict] = []
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        futs = {
+            pool.submit(probe_server, label, payload, connect_to=connect_to, read_to=read_to): label
+            for label in labels
+        }
+        for fut in as_completed(futs):
+            results.append(fut.result())
+
+    ok = [r for r in results if r.get("ok")]
+    fail = [r for r in results if not r.get("ok")]
+    ok.sort(key=lambda r: r["mbps"], reverse=True)
+    return [*ok, *fail]
 
 
 def upload_file(filepath, folder_id=None, on_progress=None, should_cancel=None):

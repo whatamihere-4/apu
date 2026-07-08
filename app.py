@@ -51,6 +51,7 @@ from filester_upload import (
 from oshash_remote import fetch_oshash_from_url
 from queue_persist import track_add, track_remove
 from queue_api import register_queue_routes
+import server_scan
 
 app = Flask(__name__)
 
@@ -5877,6 +5878,7 @@ def api_upload_config():
         "filester_folder_sync_enabled": FILESTER_FOLDER_SYNC_ENABLED,
         "filester_folder_sync_interval_sec": FILESTER_FOLDER_SYNC_INTERVAL_SEC,
         "filester_folder_sync": dict(_filester_sync_state),
+        "server_scan": server_scan.get_scan_status(),
         "job_links_filename_only": JOB_LINKS_FILENAME_ONLY,
     })
 
@@ -6514,6 +6516,7 @@ _restore_pending_queue = register_queue_routes(
 )
 
 _start_filester_folder_sync_background()
+server_scan.start_background_server_scans()
 
 
 if __name__ == "__main__":

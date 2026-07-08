@@ -252,6 +252,7 @@
 <body>
   <h1>apu</h1>
   <p class="subtitle" id="provider-subtitle">Upload &mdash; from link or file</p>
+  <p class="subtitle" id="server-scan-hint" style="margin-top:-0.25rem; font-size:0.75rem; color:var(--muted);"></p>
   <p class="subtitle" style="margin-top:-0.5rem;">
     <a href="/bbcode" style="color:var(--accent); text-decoration:none;">BBCode generator</a>
     &nbsp;·&nbsp;
@@ -1264,6 +1265,44 @@
       }
     }
 
+    function updateServerScanHint() {
+      const hint = document.getElementById('server-scan-hint');
+      if (!hint || !providerConfig || !providerConfig.server_scan) return;
+      const sc = providerConfig.server_scan || {};
+
+      function renderOne(scan, label) {
+        if (!scan || !scan.state) return null;
+        switch (scan.state) {
+          case 'disabled':
+            return null;
+          case 'pinned':
+            return `${label} pinned: ${scan.winner || '(unknown)'}`;
+          case 'cached':
+            return `${label} cached: ${scan.winner || '(unknown)'}` +
+              (scan.mbps ? ` (${Number(scan.mbps).toFixed(1)} Mbps)` : '');
+          case 'scanning': {
+            const eta = typeof scan.eta_sec === 'number' ? Math.round(scan.eta_sec) : null;
+            return `Scanning ${label}${eta !== null ? ` (ETA ~${eta}s)` : ''}…`;
+          }
+          case 'done':
+            return `${label} selected: ${scan.winner || '(unknown)'}` +
+              (scan.mbps ? ` (${Number(scan.mbps).toFixed(1)} Mbps)` : '');
+          case 'error':
+            return `${label} scan error${scan.error ? `: ${scan.error}` : ''}`;
+          default:
+            return null;
+        }
+      }
+
+      const parts = [];
+      const rdMsg = renderOne(sc.realdebrid, 'Real-Debrid CDN');
+      const gfMsg = renderOne(sc.gofile, 'GoFile upload server');
+      if (rdMsg) parts.push(rdMsg);
+      if (gfMsg) parts.push(gfMsg);
+
+      hint.textContent = parts.join(' · ');
+    }
+
     async function loadProviderConfig() {
       try {
         const cfg = await apiGet('/api/upload_config');
@@ -1277,6 +1316,7 @@
         document.getElementById('upload-btn').textContent = `Upload to ${label}`;
         updateFolderFormVisibility();
         updateFilesterSyncHint();
+        updateServerScanHint();
       } catch (e) { console.error('[apu] Failed to load provider config:', e); }
     }
 
@@ -1287,6 +1327,37 @@
     (async () => {
       await loadProviderConfig();
       await loadUploadFolders();
+    })();
+
+    // Poll scan status while any background scan is running so the banner updates.
+    (async () => {
+      let timer = null;
+
+      const refresh = async () => {
+        try {
+          const cfg = await apiGet('/api/upload_config');
+          providerConfig = cfg;
+          updateFilesterSyncHint();
+          updateServerScanHint();
+        } catch (e) { console.error('[apu] Failed to refresh scan status:', e); }
+      };
+
+      const isScanning = () => {
+        const sc = providerConfig && providerConfig.server_scan ? providerConfig.server_scan : null;
+        if (!sc) return false;
+        const rd = sc.realdebrid && sc.realdebrid.state === 'scanning';
+        const gf = sc.gofile && sc.gofile.state === 'scanning';
+        return rd || gf;
+      };
+
+      timer = setInterval(async () => {
+        if (!isScanning()) {
+          clearInterval(timer);
+          timer = null;
+          return;
+        }
+        await refresh();
+      }, 3500);
     })();
     browse('/downloads');
     refreshJobs().then((nextDelay) => scheduleJobsRefresh(nextDelay));

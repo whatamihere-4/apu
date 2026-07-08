@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import os
 import re
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable
 from urllib.parse import urlparse, urlunparse
 
@@ -19,6 +21,7 @@ API_BASE = (os.environ.get("REAL_DEBRID_API_BASE") or "https://api.real-debrid.c
 API_TOKEN = (os.environ.get("REAL_DEBRID_API_TOKEN") or "").strip()
 REMOTE = (os.environ.get("REAL_DEBRID_REMOTE") or "0").strip().lower() in ("1", "true", "yes", "on")
 _PREFERRED_CDN_RAW = (os.environ.get("REAL_DEBRID_PREFERRED_CDN") or "").strip()
+_RUNTIME_PREFERRED_CDN_RAW = ""
 
 _CONNECT_TO = int(os.environ.get("REAL_DEBRID_CONNECT_TIMEOUT_SEC", "15"))
 _READ_TO = int(os.environ.get("REAL_DEBRID_READ_TIMEOUT_SEC", "60"))
@@ -36,6 +39,37 @@ _CDN_HOST_RE = re.compile(
     r")$",
     re.IGNORECASE,
 )
+
+# Public defaults used by scripts and optional background scans.
+#
+# "Numbered pools + named metros (community-maintained lists; not exhaustive)."
+DEFAULT_HOSTS = [
+    *[f"{n}.download.real-debrid.com" for n in range(20, 24)],
+    *[f"{n}.download.real-debrid.com" for n in range(30, 35)],
+    *[f"{n}.download.real-debrid.com" for n in range(40, 46)],
+    *[f"{n}.download.real-debrid.com" for n in range(50, 70)],
+    "rbx.download.real-debrid.com",
+    "den1.download.real-debrid.com",
+    "sea1.download.real-debrid.com",
+    "nyk1.download.real-debrid.com",
+    "chi1.download.real-debrid.com",
+    "lax1.download.real-debrid.com",
+    "mia1.download.real-debrid.com",
+    "dal1.download.real-debrid.com",
+    "qro1.download.real-debrid.com",
+    "sao1.download.real-debrid.com",
+    "scl1.download.real-debrid.com",
+    "lon1.download.real-debrid.com",
+    "hkg1.download.real-debrid.com",
+    "sgp1.download.real-debrid.com",
+    "tyo1.download.real-debrid.com",
+    "mum1.download.real-debrid.com",
+    "tlv1.download.real-debrid.com",
+    "jnb1.download.real-debrid.com",
+    "45.download.real-debrid.cloud",
+]
+
+SPEEDTEST_PATHS = ("/speedtest/test.rar", "/speedtest/testDefault.rar")
 
 
 class RealDebridError(RuntimeError):
@@ -72,11 +106,23 @@ def _normalize_cdn_host(host: str) -> str:
     return f"{h}.download.real-debrid.com"
 
 
+def normalize_cdn_host(raw: str) -> str:
+    """Public wrapper for normalizing speedtest host inputs."""
+    return _normalize_cdn_host(raw)
+
+
+def set_runtime_preferred_cdn(raw: str) -> None:
+    """Set preferred CDN hosts for this process (used by background scan)."""
+    global _RUNTIME_PREFERRED_CDN_RAW
+    _RUNTIME_PREFERRED_CDN_RAW = (raw or "").strip()
+
+
 def preferred_cdn_hosts() -> list[str]:
-    """Hosts from ``REAL_DEBRID_PREFERRED_CDN`` (comma/space separated)."""
-    if not _PREFERRED_CDN_RAW:
+    """Preferred CDN hosts (env pin first, then runtime override)."""
+    raw = _PREFERRED_CDN_RAW or _RUNTIME_PREFERRED_CDN_RAW
+    if not raw:
         return []
-    parts = re.split(r"[,;\s]+", _PREFERRED_CDN_RAW)
+    parts = re.split(r"[,;\s]+", raw)
     out: list[str] = []
     seen: set[str] = set()
     for part in parts:
@@ -200,3 +246,87 @@ def resolve_download_url(url: str, *, on_log: Callable[[str], None] | None = Non
         return apply_preferred_cdn(download, on_log=on_log)
 
     return apply_preferred_cdn(raw, on_log=on_log)
+
+
+def _mbps(bytes_read: int, elapsed: float) -> float:
+    if elapsed <= 0 or bytes_read <= 0:
+        return 0.0
+    return (bytes_read * 8) / elapsed / 1_000_000
+
+
+def _probe_host(host: str, seconds: float, connect_to: float) -> dict:
+    session = requests.Session()
+    session.headers["User-Agent"] = "apu-rd-cdn-speedtest/1.0"
+    last_err = ""
+
+    for path in SPEEDTEST_PATHS:
+        url = f"https://{host}{path}"
+        started = time.monotonic()
+        bytes_read = 0
+        try:
+            with session.get(url, stream=True, timeout=(connect_to, seconds + 5)) as r:
+                if r.status_code != 200:
+                    last_err = f"HTTP {r.status_code}"
+                    continue
+                for chunk in r.iter_content(chunk_size=256 * 1024):
+                    if not chunk:
+                        continue
+                    bytes_read += len(chunk)
+                    if time.monotonic() - started >= seconds:
+                        break
+        except requests.RequestException as e:
+            last_err = str(e)[:120]
+            continue
+
+        elapsed = time.monotonic() - started
+        if bytes_read > 0 and elapsed > 0:
+            return {
+                "host": host,
+                "ok": True,
+                "mbps": _mbps(bytes_read, elapsed),
+                "mib_s": bytes_read / elapsed / (1024 * 1024),
+                "bytes": bytes_read,
+                "seconds": round(elapsed, 2),
+                "path": path,
+            }
+        last_err = last_err or "no data"
+
+    return {"host": host, "ok": False, "error": last_err or "unreachable"}
+
+
+def benchmark_hosts(
+    hosts: list[str],
+    *,
+    seconds: float,
+    workers: int,
+    connect_to: float,
+) -> list[dict]:
+    """Benchmark Real-Debrid CDN hosts by downloading public speedtest files.
+
+    Returns probe results (ok first, sorted by mbps desc, then failures).
+    """
+    norm_hosts = []
+    seen: set[str] = set()
+    for h in hosts:
+        norm = normalize_cdn_host(h)
+        if not norm or norm in seen:
+            continue
+        seen.add(norm)
+        norm_hosts.append(norm)
+
+    if not norm_hosts:
+        return []
+
+    results: list[dict] = []
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        futs = {
+            pool.submit(_probe_host, host, seconds, connect_to): host
+            for host in norm_hosts
+        }
+        for fut in as_completed(futs):
+            results.append(fut.result())
+
+    ok = [r for r in results if r.get("ok")]
+    fail = [r for r in results if not r.get("ok")]
+    ok.sort(key=lambda r: r["mbps"], reverse=True)
+    return [*ok, *fail]
