@@ -184,6 +184,10 @@ HASHER_ENABLED = _env_yes("HASHER_ENABLED", default="1")
 HASHER_OSHASH_ENABLED = _env_yes("HASHER_OSHASH_ENABLED", default="1")
 HASHER_MD5_ENABLED = _env_yes("HASHER_MD5_ENABLED", default="1")
 HASHER_PHASH_ENABLED = _env_yes("HASHER_PHASH_ENABLED", default="1")
+# When 1, only compute PHASH after a StashDB match when neither OSHASH nor MD5 matched.
+# The upload check already short-circuits OSHASH → MD5 → PHASH; this also skips the
+# post-match PHASH follow-up (submitFingerprint) when the match came from OSHASH/MD5.
+HASHER_PHASH_ONLY_ON_MISS = _env_yes("HASHER_PHASH_ONLY_ON_MISS", default="0")
 STASHDB_DRAFTS_BASE = (os.environ.get("STASHDB_DRAFTS_BASE") or "https://stashdb.org/drafts").rstrip("/")
 STASHDB_SCENES_BASE = (os.environ.get("STASHDB_SCENES_BASE") or "https://stashdb.org/scenes").rstrip("/")
 # After a StashDB match during post-upload check, submit fingerprints via submitFingerprint (kill-switch).
@@ -4625,6 +4629,17 @@ def _stashdb_phash_followup(job_id, downloaded_path):
     mp = job.get("stashdb_match")
     if not mp:
         return
+    if HASHER_PHASH_ONLY_ON_MISS:
+        matched_by = (mp.get("matched_by") or "").strip().upper()
+        if matched_by in ("OSHASH", "MD5"):
+            _stashdb_contribute_merge_delta(
+                job_id,
+                message_suffix=(
+                    f"Optional PHASH: skipped (matched by {matched_by}; "
+                    "HASHER_PHASH_ONLY_ON_MISS=1)."
+                ),
+            )
+            return
     scene_id = (mp.get("scene_id") or "").strip()
     if not scene_id:
         _stashdb_contribute_merge_delta(
