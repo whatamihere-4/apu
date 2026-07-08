@@ -364,7 +364,7 @@ def start_background_server_scans() -> None:
         gofile_auto = _env_yes("GOFILE_AUTO_SCAN", default=gofile_auto_default)
 
         # GoFile scan requires API key.
-        gofile_ready = bool(getattr(gofile_upload, "GOFILE_API_KEY", "") or "").strip()
+        gofile_ready = bool((getattr(gofile_upload, "GOFILE_API_KEY", "") or "").strip())
 
         if rd_pinned:
             winner = (os.environ.get("REAL_DEBRID_PREFERRED_CDN") or "").strip()
