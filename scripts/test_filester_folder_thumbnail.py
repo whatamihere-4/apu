@@ -1,24 +1,20 @@
 #!/usr/bin/env python3
-"""Upload a PNG into a Filester folder and verify its thumbnail_url.
+"""Set a Filester folder cover image and verify thumbnail_url.
 
-Filester does not take a bare filename in JSON. Per https://filester.me/api-docs
-you multipart-upload the image bytes with:
+Important: ``POST /api/v1/upload`` with ``X-Folder-ID`` adds a file *into* the folder.
+That is not the same as setting the folder cover/thumbnail shown on /f/<id> pages.
 
-  POST /api/v1/upload
-  Authorization: Bearer <FILESTER_API_KEY>
-  X-Folder-ID: <folder_id>
-  form field: file=@/path/to/image.png
+Folder rows from ``GET /api/v1/folders`` expose ``thumbnail_url`` once a cover exists.
+The public docs describe reading that field; the write endpoint may still be rolling
+out — this script probes likely v1 paths and prints before/after folder metadata.
 
-Folder rows from GET /api/v1/folders then expose thumbnail_url (same field naming
-as file list/detail responses).
-
-Usage (reads .env on the VPS / locally):
+Usage:
 
   python scripts/test_filester_folder_thumbnail.py \\
     --folder 83ffc3af668a663b \\
-    --image ./cover.png
+    --image ./your.jpg
 
-If --image is omitted, the first *.png in the repo root is used.
+If --image is omitted, the first *.png/*.jpg in the repo root is used.
 """
 from __future__ import annotations
 
@@ -52,9 +48,12 @@ def _load_dotenv() -> None:
                 os.environ[key] = val
 
 
-def _default_png() -> str:
-    matches = sorted(glob.glob(os.path.join(APP_DIR, "*.png")))
-    return matches[0] if matches else ""
+def _default_image() -> str:
+    for pattern in ("*.png", "*.jpg", "*.jpeg", "*.webp"):
+        matches = sorted(glob.glob(os.path.join(APP_DIR, pattern)))
+        if matches:
+            return matches[0]
+    return ""
 
 
 def main() -> int:
@@ -66,12 +65,12 @@ def main() -> int:
     )
     parser.add_argument(
         "--image",
-        help="PNG/JPEG/WebP path to upload (default: first *.png in repo root)",
+        help="Cover image path (default: first image in repo root)",
     )
     parser.add_argument(
         "--wait-sec",
         type=float,
-        default=3.0,
+        default=2.0,
         help="Seconds to wait before re-fetching folder thumbnail_url",
     )
     args = parser.parse_args()
@@ -82,9 +81,9 @@ def main() -> int:
     import filester_upload
 
     folder_id = (args.folder or "").strip()
-    image_path = (args.image or "").strip() or _default_png()
+    image_path = (args.image or "").strip() or _default_image()
     if not image_path:
-        print("error: no --image given and no *.png found in repo root", file=sys.stderr)
+        print("error: no --image given and no image found in repo root", file=sys.stderr)
         return 1
     if not os.path.isfile(image_path):
         print(f"error: image not found: {image_path}", file=sys.stderr)
@@ -112,23 +111,23 @@ def main() -> int:
             ),
         )
     else:
-        print("Before: folder id not found in GET /api/v1/folders (will still try upload)")
+        print("Before: folder id not found in GET /api/v1/folders")
     print()
 
     try:
-        upload = filester_upload.upload_folder_thumbnail_image(folder_id, image_path)
+        result = filester_upload.set_folder_thumbnail(folder_id, image_path)
     except Exception as exc:
-        print(f"upload failed: {exc}", file=sys.stderr)
+        print(f"thumbnail upload failed: {exc}", file=sys.stderr)
+        print(
+            "\nIf this 404s, Filester may not have shipped the v1 thumbnail endpoint yet.\n"
+            "Open folder Edit in the web manager, set a cover, and check DevTools → Network\n"
+            "for the real path (likely a non-/api/v1/ route today).",
+            file=sys.stderr,
+        )
         return 1
 
-    print("Upload response:")
-    print(json.dumps(upload, indent=2))
-    slug = filester_upload.file_identifier_from_response(upload)
-    file_url = filester_upload.gallery_url_from_response(upload)
-    if slug:
-        print(f"Uploaded file id/slug: {slug}")
-    if file_url:
-        print(f"Uploaded file URL:     {file_url}")
+    print("Thumbnail response:")
+    print(json.dumps(result, indent=2))
     print()
 
     if args.wait_sec > 0:
@@ -136,7 +135,7 @@ def main() -> int:
 
     after = filester_upload.find_folder_row(folder_id)
     if not after:
-        print("error: folder still not visible after upload", file=sys.stderr)
+        print("error: folder not visible after thumbnail upload", file=sys.stderr)
         return 1
 
     thumb = filester_upload.folder_thumbnail_url(after)
@@ -158,11 +157,8 @@ def main() -> int:
         return 0
 
     print(
-        "WARN — upload succeeded but folder thumbnail_url is still empty.\n"
-        "       Filester may need more time to process the image, or the folder\n"
-        "       cover may only update when the uploaded file is an image in an\n"
-        "       otherwise-empty folder. Re-run with a longer --wait-sec or check\n"
-        f"       {filester_upload.folder_url(folder_id)} in a browser."
+        "WARN — thumbnail call succeeded but folder thumbnail_url is still empty.\n"
+        f"Check {filester_upload.folder_url(folder_id)} in a browser."
     )
     return 2
 

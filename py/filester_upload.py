@@ -310,18 +310,21 @@ def gallery_url_from_response(raw: dict) -> str:
     return ""
 
 
-def upload_folder_thumbnail_image(
+def set_folder_thumbnail(
     folder_id: str,
     image_path: str,
     *,
     on_progress=None,
     should_cancel=None,
 ) -> dict:
-    """Upload an image into ``folder_id`` via POST /api/v1/upload (X-Folder-ID).
+    """Upload a folder cover image (multipart), separate from adding a folder file.
 
-    Per https://filester.me/api-docs this is a multipart file upload (not a JSON
-    filename). Folder rows from GET /api/v1/folders expose ``thumbnail_url`` once
-    Filester has processed the cover image.
+    Filester distinguishes:
+    - ``POST /api/v1/upload`` + ``X-Folder-ID`` → adds a normal file inside the folder
+    - folder cover/thumbnail → separate endpoint (see Filester API docs / manager UI)
+
+    This helper tries the documented-style thumbnail upload shape. If Filester returns
+    404, capture the request from DevTools when setting a cover in the web manager.
     """
     fid = (folder_id or "").strip()
     if not fid:
@@ -329,9 +332,63 @@ def upload_folder_thumbnail_image(
     path = (image_path or "").strip()
     if not path or not os.path.isfile(path):
         raise FileNotFoundError(f"thumbnail image not found: {image_path!r}")
-    return upload_file(
-        path,
-        folder_id=fid,
+
+    filename = os.path.basename(path)
+    attempts: list[tuple[str, dict, dict]] = [
+        (
+            f"{FILESTER_BASE_URL}/api/v1/folder/thumbnail",
+            {},
+            {"folder": fid},
+        ),
+        (
+            f"{FILESTER_BASE_URL}/api/v1/folder/{urllib.parse.quote(fid, safe='')}/thumbnail",
+            {},
+            {},
+        ),
+    ]
+
+    last_err: Exception | None = None
+    for url, extra_headers, extra_fields in attempts:
+        try:
+            with open(path, "rb") as fp:
+                r = requests.post(
+                    url,
+                    headers={**_auth_headers(), **extra_headers},
+                    files={"file": (filename, fp, "application/octet-stream")},
+                    data=extra_fields,
+                    timeout=120,
+                )
+            if r.status_code == 404:
+                last_err = RuntimeError(f"HTTP 404 for {url}")
+                continue
+            r.raise_for_status()
+            body = r.json()
+            if not body.get("success"):
+                raise RuntimeError(f"Filester folder thumbnail failed: {body}")
+            print(f"[FILESTER] folder thumbnail set via {url}", flush=True)
+            return body
+        except Exception as exc:  # noqa: BLE001
+            last_err = exc
+
+    raise RuntimeError(
+        "Could not set folder thumbnail via known v1 paths. "
+        "Uploading with X-Folder-ID only adds a file to the folder; it does not set "
+        "the folder cover. Open the folder in Filester manager → Edit, set a cover, "
+        "and inspect DevTools → Network for the real endpoint."
+    ) from last_err
+
+
+def upload_folder_thumbnail_image(
+    folder_id: str,
+    image_path: str,
+    *,
+    on_progress=None,
+    should_cancel=None,
+) -> dict:
+    """Backward-compatible alias for :func:`set_folder_thumbnail`."""
+    return set_folder_thumbnail(
+        folder_id,
+        image_path,
         on_progress=on_progress,
         should_cancel=should_cancel,
     )

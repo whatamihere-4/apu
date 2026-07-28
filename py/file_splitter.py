@@ -3,8 +3,9 @@
 No re-encoding ever happens: every part is produced with ``-c copy`` and keeps
 the source container/codecs. Parts are named ``<name>.PART1.<ext>``,
 ``<name>.PART2.<ext>`` ... and each is independently playable
-(``-reset_timestamps 1``). Rejoin losslessly with the **concat demuxer** and
-stream copy (not the concat filter — that re-encodes):
+(``-reset_timestamps 1``). Splits are aligned to video keyframes so parts
+rejoin cleanly with stream-copy concat (no re-encode). Rejoin with the **concat
+demuxer** and stream copy (not the concat filter — that re-encodes):
 
     # list.txt — one ``file 'path'`` line per part, in order
     ffmpeg -f concat -safe 0 -i list.txt -c copy movie.mkv
@@ -17,7 +18,6 @@ Used in-process by apu and by the splitter-http sidecar.
 """
 from __future__ import annotations
 
-import math
 import os
 import subprocess
 import threading
@@ -27,6 +27,7 @@ FFMPEG_BIN = os.environ.get("FFMPEG_BIN", "ffmpeg")
 FFPROBE_BIN = os.environ.get("FFPROBE_BIN", "ffprobe")
 # Target a fraction of the limit so keyframe-boundary overshoot stays under it.
 _TARGET_FACTORS = (0.90, 0.75, 0.60)
+_KEYFRAME_EPS = 0.001
 
 
 class SplitError(RuntimeError):
@@ -55,6 +56,87 @@ def probe_duration(path: str) -> float:
             f"Could not determine media duration via ffprobe (got {raw!r}); cannot split {os.path.basename(path)}"
         )
     return dur
+
+
+def probe_keyframe_times(path: str) -> list[float]:
+    """Return sorted presentation timestamps of video keyframes."""
+    proc = subprocess.run(
+        [
+            FFPROBE_BIN,
+            "-v",
+            "error",
+            "-skip_frame",
+            "nokey",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "frame=pkt_pts_time",
+            "-of",
+            "csv=p=0",
+            path,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=3600,
+    )
+    if proc.returncode != 0:
+        tail = (proc.stderr or "")[-400:]
+        raise SplitError(f"ffprobe keyframe scan failed for {os.path.basename(path)}: {tail}")
+
+    times: list[float] = []
+    for line in (proc.stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            t = float(line)
+        except ValueError:
+            continue
+        if t >= -_KEYFRAME_EPS:
+            times.append(t)
+
+    if not times:
+        raise SplitError(f"No video keyframes found in {os.path.basename(path)}")
+
+    return sorted(set(times))
+
+
+def plan_keyframe_part_starts(
+    keyframes: list[float],
+    duration: float,
+    target_segment_time: float,
+) -> list[float]:
+    """Return part start times ``[0, kf1, kf2, ...]`` on keyframe boundaries."""
+    if duration <= 0:
+        return [0.0]
+
+    kf = sorted(set(keyframes))
+    if kf[0] > _KEYFRAME_EPS:
+        kf = [0.0, *kf]
+
+    starts = [0.0]
+    while starts[-1] < duration - _KEYFRAME_EPS:
+        target = starts[-1] + max(1.0, target_segment_time)
+        if target >= duration - _KEYFRAME_EPS:
+            break
+
+        candidates = [t for t in kf if t >= target - _KEYFRAME_EPS]
+        if not candidates:
+            break
+
+        next_start = candidates[0]
+        if next_start <= starts[-1] + _KEYFRAME_EPS:
+            later = [t for t in kf if t > starts[-1] + _KEYFRAME_EPS]
+            if not later:
+                break
+            next_start = later[0]
+
+        if next_start >= duration - _KEYFRAME_EPS:
+            break
+
+        starts.append(next_start)
+
+    return starts
 
 
 def _part_paths(output_dir: str, stem: str, ext: str) -> list[str]:
@@ -320,27 +402,42 @@ def _extract_single_segment(
     path: str,
     output_path: str,
     start_sec: float,
-    duration_sec: float,
+    end_sec: float,
     *,
     timeout: int,
     on_log=None,
     should_cancel=None,
 ) -> None:
-    """Extract one stream-copy segment (playable output with normal extension)."""
+    """Stream-copy ``[start_sec, end_sec)`` from ``path``.
+
+    ``-ss`` is placed after ``-i`` so stream-copy seeks to the exact keyframe
+    start time instead of snapping to an earlier keyframe (which overlaps parts).
+    """
+    duration_sec = end_sec - start_sec
+    if duration_sec <= _KEYFRAME_EPS:
+        raise SplitError(
+            f"Refusing zero-length segment for {os.path.basename(output_path)} "
+            f"({start_sec:.3f}s–{end_sec:.3f}s)"
+        )
+
     cmd = [
         FFMPEG_BIN, "-hide_banner", "-y",
-        "-ss", str(max(0.0, start_sec)),
         "-i", path,
-        "-t", str(max(0.001, duration_sec)),
+    ]
+    if start_sec > _KEYFRAME_EPS:
+        cmd += ["-ss", str(start_sec)]
+    cmd += [
+        "-t", str(duration_sec),
         *_copy_stream_maps(),
         "-c", "copy",
         "-reset_timestamps", "1",
+        "-avoid_negative_ts", "make_zero",
         output_path,
     ]
     if on_log:
         on_log(
             f"ffmpeg slice {os.path.basename(output_path)} "
-            f"@ {start_sec:.1f}s for {duration_sec:.1f}s"
+            f"@ {start_sec:.3f}s–{end_sec:.3f}s ({duration_sec:.3f}s)"
         )
     _run_ffmpeg_logged(
         cmd, timeout=timeout, on_log=on_log, should_cancel=should_cancel,
@@ -381,10 +478,11 @@ def iter_upload_parts_sliced(
     base = os.path.basename(path)
     stem, ext = os.path.splitext(base)
     duration = probe_duration(path)
+    keyframes = probe_keyframe_times(path)
     bytes_per_sec = size / duration
 
     segment_time = None
-    num_parts = None
+    part_starts = None
     last_err = None
     for factor in _TARGET_FACTORS:
         if should_cancel and should_cancel():
@@ -393,7 +491,9 @@ def iter_upload_parts_sliced(
 
         target_bytes = int(max_bytes * factor)
         trial_segment_time = max(1, int(target_bytes / bytes_per_sec))
-        trial_num_parts = max(1, math.ceil(duration / trial_segment_time))
+        trial_starts = plan_keyframe_part_starts(
+            keyframes, duration, trial_segment_time
+        )
         probe_name = f"{stem}.PART1{ext}"
         probe_path = os.path.join(output_dir, probe_name)
         try:
@@ -402,11 +502,12 @@ def iter_upload_parts_sliced(
         except OSError:
             pass
 
+        first_end = trial_starts[1] if len(trial_starts) > 1 else duration
         _extract_single_segment(
             path,
             probe_path,
             0,
-            trial_segment_time,
+            first_end,
             timeout=ffmpeg_timeout,
             on_log=on_log,
             should_cancel=should_cancel,
@@ -427,29 +528,29 @@ def iter_upload_parts_sliced(
             continue
 
         segment_time = trial_segment_time
-        num_parts = trial_num_parts
+        part_starts = trial_starts
         if on_log:
             on_log(
-                f"ffmpeg per-part slice: {num_parts} part(s), ~{segment_time}s each "
-                f"(factor {factor})"
+                f"ffmpeg keyframe-aligned slice: {len(trial_starts)} part(s), "
+                f"~{segment_time}s target (factor {factor})"
             )
         break
 
-    if segment_time is None or num_parts is None:
+    if segment_time is None or part_starts is None:
         raise SplitError(
             f"Unable to slice {base} under {max_bytes:,} bytes. Last: {last_err}"
         )
 
     original = base
-    for idx in range(num_parts):
+    num_parts = len(part_starts)
+    for idx, start in enumerate(part_starts):
         if should_cancel and should_cancel():
             from downloader import TransferCancelled
             raise TransferCancelled("Upload cancelled")
 
-        start = idx * segment_time
-        seg_dur = min(segment_time, duration - start)
-        if seg_dur <= 0:
-            break
+        end = part_starts[idx + 1] if idx + 1 < num_parts else duration
+        if end - start <= _KEYFRAME_EPS:
+            continue
 
         part_name = f"{stem}.PART{idx + 1}{ext}"
         part_path = os.path.join(output_dir, part_name)
@@ -457,7 +558,7 @@ def iter_upload_parts_sliced(
             path,
             part_path,
             start,
-            seg_dur,
+            end,
             timeout=ffmpeg_timeout,
             on_log=on_log,
             should_cancel=should_cancel,
