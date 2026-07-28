@@ -34,21 +34,27 @@ def _auth_headers():
     return h
 
 
-def _flatten_folder_rows(rows: list, out: dict[str, str], *, recurse: bool = True) -> None:
-    """Collect {id: name} from Filester folder list payloads."""
+def _iter_folder_rows(rows: list, *, recurse: bool = True):
+    """Yield folder dict rows from GET /api/v1/folders payloads."""
     for item in rows:
         if not isinstance(item, dict):
             continue
-        fid = str(item.get("id") or item.get("identifier") or "").strip()
-        name = str(item.get("name") or "").strip()
-        if fid and name:
-            out[fid] = name
+        yield item
         if not recurse:
             continue
         for child_key in ("children", "folders", "subfolders"):
             children = item.get(child_key)
             if isinstance(children, list) and children:
-                _flatten_folder_rows(children, out, recurse=recurse)
+                yield from _iter_folder_rows(children, recurse=recurse)
+
+
+def _flatten_folder_rows(rows: list, out: dict[str, str], *, recurse: bool = True) -> None:
+    """Collect {id: name} from Filester folder list payloads."""
+    for item in _iter_folder_rows(rows, recurse=recurse):
+        fid = str(item.get("id") or item.get("identifier") or "").strip()
+        name = str(item.get("name") or "").strip()
+        if fid and name:
+            out[fid] = name
 
 
 def sanitize_folder_name(name: str, *, max_len: int = _FOLDER_NAME_MAX) -> str:
@@ -62,14 +68,8 @@ def sanitize_folder_name(name: str, *, max_len: int = _FOLDER_NAME_MAX) -> str:
     return s or "upload"
 
 
-def fetch_folder_map_from_api(*, include_children: bool = True) -> dict[str, str]:
-    """Download the account folder map from GET /api/v1/folders.
-
-    Recurses the full tree by default so nested studio folders (e.g. under a
-    root VR container) are included. Callers should filter with
-    :func:`load_folder_blacklist` to drop split-upload subfolders and any
-    container folders you do not use as upload targets.
-    """
+def fetch_folders_from_api(*, include_children: bool = True) -> list[dict]:
+    """Return raw folder rows from GET /api/v1/folders (nested tree flattened)."""
     if not FILESTER_API_KEY:
         raise RuntimeError("FILESTER_API_KEY is not set")
     url = f"{FILESTER_BASE_URL}/api/v1/folders"
@@ -81,8 +81,53 @@ def fetch_folder_map_from_api(*, include_children: bool = True) -> dict[str, str
     rows = body.get("data")
     if not isinstance(rows, list):
         raise RuntimeError(f"Unexpected Filester folders response: {body!r}")
+    return list(_iter_folder_rows(rows, recurse=include_children))
+
+
+def find_folder_row(folder_id: str, *, include_children: bool = True) -> dict | None:
+    """Return one folder row from GET /api/v1/folders, searching nested children."""
+    fid = (folder_id or "").strip()
+    if not fid:
+        return None
+    for row in fetch_folders_from_api(include_children=include_children):
+        row_id = str(row.get("id") or row.get("identifier") or "").strip()
+        if row_id == fid:
+            return row
+    return None
+
+
+def folder_thumbnail_url(folder_row: dict) -> str:
+    """Absolute thumbnail URL from a folder list/detail row."""
+    if not isinstance(folder_row, dict):
+        return ""
+    raw = str(
+        folder_row.get("thumbnail_url")
+        or folder_row.get("thumb_url")
+        or ""
+    ).strip()
+    if not raw:
+        return ""
+    if raw.startswith(("http://", "https://")):
+        return raw
+    if raw.startswith("/"):
+        return f"{FILESTER_SITE_URL}{raw}"
+    return f"{FILESTER_SITE_URL}/{raw}"
+
+
+def fetch_folder_map_from_api(*, include_children: bool = True) -> dict[str, str]:
+    """Download the account folder map from GET /api/v1/folders.
+
+    Recurses the full tree by default so nested studio folders (e.g. under a
+    root VR container) are included. Callers should filter with
+    :func:`load_folder_blacklist` to drop split-upload subfolders and any
+    container folders you do not use as upload targets.
+    """
     out: dict[str, str] = {}
-    _flatten_folder_rows(rows, out, recurse=include_children)
+    for row in fetch_folders_from_api(include_children=include_children):
+        fid = str(row.get("id") or row.get("identifier") or "").strip()
+        name = str(row.get("name") or "").strip()
+        if fid and name:
+            out[fid] = name
     return out
 
 
@@ -263,6 +308,33 @@ def gallery_url_from_response(raw: dict) -> str:
         if slug:
             return f"{FILESTER_SITE_URL}/d/{slug}"
     return ""
+
+
+def upload_folder_thumbnail_image(
+    folder_id: str,
+    image_path: str,
+    *,
+    on_progress=None,
+    should_cancel=None,
+) -> dict:
+    """Upload an image into ``folder_id`` via POST /api/v1/upload (X-Folder-ID).
+
+    Per https://filester.me/api-docs this is a multipart file upload (not a JSON
+    filename). Folder rows from GET /api/v1/folders expose ``thumbnail_url`` once
+    Filester has processed the cover image.
+    """
+    fid = (folder_id or "").strip()
+    if not fid:
+        raise ValueError("folder id required")
+    path = (image_path or "").strip()
+    if not path or not os.path.isfile(path):
+        raise FileNotFoundError(f"thumbnail image not found: {image_path!r}")
+    return upload_file(
+        path,
+        folder_id=fid,
+        on_progress=on_progress,
+        should_cancel=should_cancel,
+    )
 
 
 def upload_file(filepath, folder_id=None, on_progress=None, should_cancel=None):
