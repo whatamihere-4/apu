@@ -3,6 +3,7 @@ FROM alpine:3.20
 # ffmpeg/ffprobe: stream-copy segmenting; python3: HTTP API (stdlib only).
 RUN apk add --no-cache \
     ffmpeg \
+    mkvtoolnix \
     python3
 
 RUN mkdir -p /usr/local/lib/splitter

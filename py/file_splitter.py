@@ -2,10 +2,11 @@
 
 No re-encoding ever happens: every part is produced with ``-c copy`` and keeps
 the source container/codecs. Parts are named ``<name>.PART1.<ext>``,
-``<name>.PART2.<ext>`` ... and each is independently playable
-(``-reset_timestamps 1``). Splits are aligned to video keyframes so parts
-rejoin cleanly with stream-copy concat (no re-encode). Rejoin with the **concat
-demuxer** and stream copy (not the concat filter — that re-encodes):
+``<name>.PART2.<ext>`` ... and each is independently playable. Splits are
+aligned to video keyframes so parts rejoin cleanly with stream-copy concat (no
+re-encode). The ``ffmpeg_slice`` path uses mkvmerge time boundaries streamed
+through a fifo into ffmpeg remux (~source + one part on disk). Rejoin with the
+**concat demuxer** and stream copy (not the concat filter — that re-encodes):
 
     # list.txt — one ``file 'path'`` line per part, in order
     ffmpeg -f concat -safe 0 -i list.txt -c copy movie.mkv
@@ -25,13 +26,37 @@ import time
 
 FFMPEG_BIN = os.environ.get("FFMPEG_BIN", "ffmpeg")
 FFPROBE_BIN = os.environ.get("FFPROBE_BIN", "ffprobe")
+MKVMERGE_BIN = os.environ.get("MKVMERGE_BIN", "mkvmerge")
 # Target a fraction of the limit so keyframe-boundary overshoot stays under it.
 _TARGET_FACTORS = (0.90, 0.75, 0.60)
 _KEYFRAME_EPS = 0.001
+_SPARSE_INITIAL_WINDOW_SEC = 180.0
+_SPARSE_MAX_WINDOW_SEC = 300.0
+_SPARSE_LOOKBACK_SEC = 30.0
+_SPARSE_FORWARD_STEP_SEC = 150.0
 
 
 class SplitError(RuntimeError):
     pass
+
+
+class _KeyframeCache:
+    """Accumulate keyframe PTS values across sparse probes for one file."""
+
+    def __init__(self) -> None:
+        self._times: set[float] = {0.0}
+
+    def add(self, times: list[float]) -> None:
+        self._times.update(times)
+
+    def at_or_after(self, target_sec: float) -> float | None:
+        return _select_keyframe_at_or_after(sorted(self._times), target_sec)
+
+
+def _check_cancel(should_cancel) -> None:
+    if should_cancel and should_cancel():
+        from downloader import TransferCancelled
+        raise TransferCancelled("Upload cancelled")
 
 
 def probe_duration(path: str) -> float:
@@ -58,6 +83,59 @@ def probe_duration(path: str) -> float:
     return dur
 
 
+def _parse_keyframe_times(stdout: str) -> list[float]:
+    times: list[float] = []
+    for line in (stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            t = float(line)
+        except ValueError:
+            continue
+        if t >= -_KEYFRAME_EPS:
+            times.append(t)
+    return times
+
+
+def _keyframes_from_packets(path: str) -> list[float]:
+    proc = subprocess.run(
+        [
+            FFPROBE_BIN,
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "packet=pts_time,flags",
+            "-of",
+            "csv=p=0",
+            path,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=3600,
+    )
+    if proc.returncode != 0:
+        return []
+
+    times: list[float] = []
+    for line in (proc.stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(",", 1)
+        if len(parts) != 2 or "K" not in parts[1]:
+            continue
+        try:
+            t = float(parts[0])
+        except ValueError:
+            continue
+        if t >= -_KEYFRAME_EPS:
+            times.append(t)
+    return times
+
+
 def probe_keyframe_times(path: str) -> list[float]:
     """Return sorted presentation timestamps of video keyframes."""
     proc = subprocess.run(
@@ -70,7 +148,7 @@ def probe_keyframe_times(path: str) -> list[float]:
             "-select_streams",
             "v:0",
             "-show_entries",
-            "frame=pkt_pts_time",
+            "frame=pts_time",
             "-of",
             "csv=p=0",
             path,
@@ -83,22 +161,172 @@ def probe_keyframe_times(path: str) -> list[float]:
         tail = (proc.stderr or "")[-400:]
         raise SplitError(f"ffprobe keyframe scan failed for {os.path.basename(path)}: {tail}")
 
+    times = _parse_keyframe_times(proc.stdout or "")
+    if not times:
+        times = _keyframes_from_packets(path)
+
+    if not times:
+        raise SplitError(f"No video keyframes found in {os.path.basename(path)}")
+
+    times = sorted(set(times))
+    if times[0] > _KEYFRAME_EPS:
+        times = [0.0, *times]
+    return times
+
+
+def _format_read_interval(start_sec: float, end_sec: float, duration: float) -> str:
+    if duration <= 0:
+        raise SplitError("Cannot build read interval for zero-duration media")
+    start_sec = max(0.0, min(start_sec, duration))
+    end_sec = max(start_sec, min(end_sec, duration))
+    if end_sec <= start_sec + _KEYFRAME_EPS:
+        end_sec = min(duration, start_sec + 1.0)
+    return f"{start_sec:.3f}%{end_sec:.3f}"
+
+
+def _keyframes_from_packets_in_interval(
+    path: str,
+    *,
+    start_sec: float,
+    end_sec: float,
+) -> list[float]:
+    proc = subprocess.run(
+        [
+            FFPROBE_BIN,
+            "-v",
+            "error",
+            "-read_intervals",
+            f"{start_sec:.6f}%{end_sec:.6f}",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "packet=pts_time,flags",
+            "-of",
+            "csv=p=0",
+            path,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    if proc.returncode != 0:
+        return []
+
     times: list[float] = []
     for line in (proc.stdout or "").splitlines():
         line = line.strip()
         if not line:
             continue
+        parts = line.split(",", 1)
+        if len(parts) != 2 or "K" not in parts[1]:
+            continue
         try:
-            t = float(line)
+            t = float(parts[0])
         except ValueError:
             continue
-        if t >= -_KEYFRAME_EPS:
+        if start_sec - _KEYFRAME_EPS <= t <= end_sec + _KEYFRAME_EPS:
             times.append(t)
+    return times
 
+
+def _probe_keyframes_in_interval(
+    path: str,
+    *,
+    start_sec: float,
+    end_sec: float,
+    duration: float,
+) -> list[float]:
+    if duration <= 0:
+        return []
+    start_sec = max(0.0, start_sec)
+    end_sec = min(duration, end_sec)
+    if end_sec <= start_sec + _KEYFRAME_EPS:
+        return []
+
+    interval = _format_read_interval(start_sec, end_sec, duration)
+    proc = subprocess.run(
+        [
+            FFPROBE_BIN,
+            "-v",
+            "error",
+            "-read_intervals",
+            interval,
+            "-skip_frame",
+            "nokey",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "frame=pts_time",
+            "-of",
+            "csv=p=0",
+            path,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    if proc.returncode != 0:
+        tail = (proc.stderr or "")[-400:]
+        raise SplitError(
+            f"ffprobe keyframe window failed for {os.path.basename(path)} ({interval}): {tail}"
+        )
+
+    times = _parse_keyframe_times(proc.stdout or "")
     if not times:
-        raise SplitError(f"No video keyframes found in {os.path.basename(path)}")
-
+        times = _keyframes_from_packets_in_interval(
+            path, start_sec=start_sec, end_sec=end_sec
+        )
     return sorted(set(times))
+
+
+def _select_keyframe_at_or_after(times: list[float], target_sec: float) -> float | None:
+    candidates = [t for t in sorted(times) if t >= target_sec - _KEYFRAME_EPS]
+    return candidates[0] if candidates else None
+
+
+def find_keyframe_at_or_after(
+    path: str,
+    target_sec: float,
+    duration: float,
+    target_segment_time: float,
+    *,
+    cache: _KeyframeCache | None = None,
+) -> float | None:
+    if duration <= 0:
+        return None
+
+    target_sec = max(0.0, min(target_sec, duration))
+    if cache is not None:
+        cached = cache.at_or_after(target_sec)
+        if cached is not None:
+            return cached
+
+    window = min(
+        _SPARSE_MAX_WINDOW_SEC,
+        max(_SPARSE_INITIAL_WINDOW_SEC, min(target_segment_time * 0.15, 240.0)),
+    )
+    cursor = max(0.0, target_sec - _SPARSE_LOOKBACK_SEC)
+
+    while cursor < duration - _KEYFRAME_EPS:
+        end = min(duration, cursor + window)
+        times = _probe_keyframes_in_interval(
+            path, start_sec=cursor, end_sec=end, duration=duration
+        )
+        if cache is not None:
+            cache.add(times)
+
+        picked = _select_keyframe_at_or_after(times, target_sec)
+        if picked is not None:
+            return picked
+
+        if end >= duration - _KEYFRAME_EPS:
+            break
+        cursor = max(cursor + _SPARSE_FORWARD_STEP_SEC, end - _SPARSE_LOOKBACK_SEC)
+
+    full = probe_keyframe_times(path)
+    if cache is not None:
+        cache.add(full)
+    return _select_keyframe_at_or_after(full, target_sec)
 
 
 def plan_keyframe_part_starts(
@@ -137,6 +365,60 @@ def plan_keyframe_part_starts(
         starts.append(next_start)
 
     return starts
+
+
+def plan_sparse_keyframe_part_starts(
+    path: str,
+    duration: float,
+    target_segment_time: float,
+) -> list[float]:
+    """Plan part starts by probing only near each split boundary."""
+    if duration <= 0:
+        return [0.0]
+
+    cache = _KeyframeCache()
+    starts = [0.0]
+    while starts[-1] < duration - _KEYFRAME_EPS:
+        target = starts[-1] + max(1.0, target_segment_time)
+        if target >= duration - _KEYFRAME_EPS:
+            break
+
+        next_start = find_keyframe_at_or_after(
+            path, target, duration, target_segment_time, cache=cache
+        )
+        if next_start is None:
+            break
+        if next_start <= starts[-1] + _KEYFRAME_EPS:
+            next_start = find_keyframe_at_or_after(
+                path,
+                starts[-1] + _KEYFRAME_EPS,
+                duration,
+                target_segment_time,
+                cache=cache,
+            )
+            if next_start is None or next_start <= starts[-1] + _KEYFRAME_EPS:
+                break
+
+        if next_start >= duration - _KEYFRAME_EPS:
+            break
+
+        starts.append(next_start)
+
+    return starts
+
+
+def _format_mkvmerge_time(sec: float) -> str:
+    sec = max(0.0, sec)
+    hours = int(sec // 3600)
+    minutes = int((sec % 3600) // 60)
+    seconds = sec % 60
+    return f"{hours:02d}:{minutes:02d}:{seconds:06.3f}"
+
+
+def _mkvmerge_split_spec(start_sec: float, end_sec: float, duration: float) -> str:
+    if end_sec >= duration - _KEYFRAME_EPS:
+        return f"parts:{_format_mkvmerge_time(start_sec)}-"
+    return f"parts:{_format_mkvmerge_time(start_sec)}-{_format_mkvmerge_time(end_sec)}"
 
 
 def _part_paths(output_dir: str, stem: str, ext: str) -> list[str]:
@@ -404,44 +686,109 @@ def _extract_single_segment(
     start_sec: float,
     end_sec: float,
     *,
+    duration: float,
     timeout: int,
     on_log=None,
     should_cancel=None,
 ) -> None:
-    """Stream-copy ``[start_sec, end_sec)`` from ``path``.
-
-    ``-ss`` is placed after ``-i`` so stream-copy seeks to the exact keyframe
-    start time instead of snapping to an earlier keyframe (which overlaps parts).
-    """
-    duration_sec = end_sec - start_sec
-    if duration_sec <= _KEYFRAME_EPS:
+    """Extract ``[start_sec, end_sec)`` via mkvmerge → fifo → ffmpeg (no temp file)."""
+    if end_sec - start_sec <= _KEYFRAME_EPS:
         raise SplitError(
             f"Refusing zero-length segment for {os.path.basename(output_path)} "
             f"({start_sec:.3f}s–{end_sec:.3f}s)"
         )
 
-    cmd = [
-        FFMPEG_BIN, "-hide_banner", "-y",
-        "-i", path,
-    ]
-    if start_sec > _KEYFRAME_EPS:
-        cmd += ["-ss", str(start_sec)]
-    cmd += [
-        "-t", str(duration_sec),
-        *_copy_stream_maps(),
-        "-c", "copy",
-        "-reset_timestamps", "1",
-        "-avoid_negative_ts", "make_zero",
+    spec = _mkvmerge_split_spec(start_sec, end_sec, duration)
+    fifo = output_path + ".fifo"
+    try:
+        if os.path.exists(fifo):
+            os.unlink(fifo)
+    except OSError:
+        pass
+    os.mkfifo(fifo)
+
+    ffmpeg_cmd = [
+        FFMPEG_BIN,
+        "-hide_banner",
+        "-y",
+        "-i",
+        fifo,
+        "-c",
+        "copy",
+        "-movflags",
+        "+faststart",
         output_path,
     ]
     if on_log:
-        on_log(
-            f"ffmpeg slice {os.path.basename(output_path)} "
-            f"@ {start_sec:.3f}s–{end_sec:.3f}s ({duration_sec:.3f}s)"
+        on_log(f"mkvmerge→fifo→ffmpeg {os.path.basename(output_path)} {spec}")
+
+    ff_proc: subprocess.Popen[str] | None = None
+    try:
+        ff_proc = subprocess.Popen(
+            ffmpeg_cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
         )
-    _run_ffmpeg_logged(
-        cmd, timeout=timeout, on_log=on_log, should_cancel=should_cancel,
-    )
+        _check_cancel(should_cancel)
+
+        mkv_cmd = [
+            MKVMERGE_BIN,
+            "-q",
+            "-o",
+            fifo,
+            "--split",
+            spec,
+            path,
+        ]
+        deadline = time.time() + timeout
+        try:
+            mkv_proc = subprocess.run(
+                mkv_cmd,
+                capture_output=True,
+                text=True,
+                timeout=max(1, int(deadline - time.time())),
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise SplitError(f"mkvmerge timed out after {timeout}s") from exc
+
+        assert ff_proc is not None
+        while ff_proc.poll() is None:
+            _check_cancel(should_cancel)
+            if time.time() > deadline:
+                ff_proc.kill()
+                ff_proc.communicate()
+                raise SplitError(f"ffmpeg timed out after {timeout}s")
+            time.sleep(0.25)
+        _, ff_stderr = ff_proc.communicate()
+
+        if ff_proc.returncode != 0:
+            tail = ff_stderr[-600:]
+            mkv_tail = (mkv_proc.stderr or mkv_proc.stdout or "")[-300:]
+            raise SplitError(
+                f"ffmpeg remux failed (exit {ff_proc.returncode}) for "
+                f"{os.path.basename(output_path)}: {tail}; "
+                f"mkvmerge exit {mkv_proc.returncode}: {mkv_tail}"
+            )
+
+        if mkv_proc.returncode >= 2:
+            pass  # mkvmerge fifo exit 2 is expected after mux finishes
+        elif mkv_proc.returncode == 1 and on_log:
+            tail = (mkv_proc.stderr or mkv_proc.stdout or "").strip()
+            if tail:
+                on_log(f"mkvmerge warnings for {os.path.basename(output_path)}: {tail[-400:]}")
+
+        if not os.path.isfile(output_path) or os.path.getsize(output_path) <= 0:
+            raise SplitError(f"ffmpeg produced no output for {os.path.basename(output_path)}")
+    finally:
+        if ff_proc is not None and ff_proc.poll() is None:
+            ff_proc.kill()
+            ff_proc.communicate()
+        try:
+            if os.path.exists(fifo):
+                os.unlink(fifo)
+        except OSError:
+            pass
 
 
 def iter_upload_parts_sliced(
@@ -454,11 +801,10 @@ def iter_upload_parts_sliced(
     delete_source: bool = True,
     ffmpeg_timeout: int = 7200,
 ):
-    """Yield one ffmpeg stream-copy part at a time (~source + one part on disk).
+    """Yield one mkvmerge/ffmpeg part at a time (~source + one part on disk).
 
     Parts use playable names (``movie.PART1.mp4``). Segment duration is tuned
-    using the same byte budget as one-pass ffmpeg; the first part is probed before
-    any uploads begin.
+    using sparse keyframe probes; the first part is extracted before uploads begin.
     """
     size = os.path.getsize(path)
     if size <= max_bytes:
@@ -478,21 +824,22 @@ def iter_upload_parts_sliced(
     base = os.path.basename(path)
     stem, ext = os.path.splitext(base)
     duration = probe_duration(path)
-    keyframes = probe_keyframe_times(path)
     bytes_per_sec = size / duration
 
     segment_time = None
     part_starts = None
     last_err = None
     for factor in _TARGET_FACTORS:
-        if should_cancel and should_cancel():
-            from downloader import TransferCancelled
-            raise TransferCancelled("Upload cancelled")
+        _check_cancel(should_cancel)
 
         target_bytes = int(max_bytes * factor)
         trial_segment_time = max(1, int(target_bytes / bytes_per_sec))
-        trial_starts = plan_keyframe_part_starts(
-            keyframes, duration, trial_segment_time
+        if on_log:
+            on_log(
+                f"Planning sparse keyframe split (~{trial_segment_time}s target, factor {factor})"
+            )
+        trial_starts = plan_sparse_keyframe_part_starts(
+            path, duration, trial_segment_time
         )
         probe_name = f"{stem}.PART1{ext}"
         probe_path = os.path.join(output_dir, probe_name)
@@ -508,6 +855,7 @@ def iter_upload_parts_sliced(
             probe_path,
             0,
             first_end,
+            duration=duration,
             timeout=ffmpeg_timeout,
             on_log=on_log,
             should_cancel=should_cancel,
@@ -544,9 +892,7 @@ def iter_upload_parts_sliced(
     original = base
     num_parts = len(part_starts)
     for idx, start in enumerate(part_starts):
-        if should_cancel and should_cancel():
-            from downloader import TransferCancelled
-            raise TransferCancelled("Upload cancelled")
+        _check_cancel(should_cancel)
 
         end = part_starts[idx + 1] if idx + 1 < num_parts else duration
         if end - start <= _KEYFRAME_EPS:
@@ -559,6 +905,7 @@ def iter_upload_parts_sliced(
             part_path,
             start,
             end,
+            duration=duration,
             timeout=ffmpeg_timeout,
             on_log=on_log,
             should_cancel=should_cancel,
