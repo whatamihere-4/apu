@@ -1,0 +1,13 @@
+# Local desktop overlay — no external Caddy network required.
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml build hasher-http
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml run --rm \
+#     -v "/path/to/videos:/downloads:ro" --entrypoint phasher hasher-http \
+#     -q /downloads/ORIGINAL.mp4
+#
+# Do not use this file on the VPS (keep external caddy_net there).
+
+networks:
+  app_net:
+    external: false
+    name: apu_local

@@ -7,10 +7,12 @@ env-var change (UPLOAD_PROVIDER=filester) plus FILESTER_API_KEY.
 from __future__ import annotations
 
 import json
+import mimetypes
 import os
 import re
 import time
 import urllib.parse
+from pathlib import Path
 
 import requests
 from requests_toolbelt import MultipartEncoder, MultipartEncoderMonitor
@@ -334,27 +336,36 @@ def set_folder_thumbnail(
         raise FileNotFoundError(f"thumbnail image not found: {image_path!r}")
 
     filename = os.path.basename(path)
-    attempts: list[tuple[str, dict, dict]] = [
+    content_type = mimetypes.guess_type(path)[0] or "application/octet-stream"
+    attempts: list[tuple[str, dict, dict, str]] = [
         (
             f"{FILESTER_BASE_URL}/api/v1/folder/thumbnail",
             {},
             {"folder": fid},
+            "thumbnail",
+        ),
+        (
+            f"{FILESTER_BASE_URL}/api/v1/folder/thumbnail",
+            {},
+            {"folder": fid},
+            "file",
         ),
         (
             f"{FILESTER_BASE_URL}/api/v1/folder/{urllib.parse.quote(fid, safe='')}/thumbnail",
             {},
             {},
+            "file",
         ),
     ]
 
     last_err: Exception | None = None
-    for url, extra_headers, extra_fields in attempts:
+    for url, extra_headers, extra_fields, field_name in attempts:
         try:
             with open(path, "rb") as fp:
                 r = requests.post(
                     url,
                     headers={**_auth_headers(), **extra_headers},
-                    files={"file": (filename, fp, "application/octet-stream")},
+                    files={field_name: (filename, fp, content_type)},
                     data=extra_fields,
                     timeout=120,
                 )
@@ -639,17 +650,22 @@ def organize_split_parts_into_folder(
     parent_folder_id: str,
     folder_name: str,
     upload_responses: list[dict],
+    folder_title: str | None = None,
+    cover_image_path: str | Path | None = None,
     blacklist_label: str = "",
     on_log=None,
 ) -> str:
     """Create a subfolder under ``parent_folder_id`` and move split parts into it.
 
     Parts are expected to live in the studio parent folder during upload; this
-    runs at job finalize so StashDB can supply the folder name first. Returns
-    the destination folder id, or ``parent_folder_id`` if organize failed.
+    runs at job finalize once all parts finish uploading.
+
+    ``folder_title`` overrides ``folder_name`` when set (e.g. StashDB scene title).
+    ``cover_image_path`` uploads a folder thumbnail after the move succeeds.
     """
     parent = (parent_folder_id or "").strip()
-    title = sanitize_folder_name(folder_name)
+    display_name = (folder_title or folder_name or "").strip() or folder_name
+    title = sanitize_folder_name(display_name)
     if not parent or not title:
         return parent
 
@@ -685,6 +701,18 @@ def organize_split_parts_into_folder(
                 f'[Filester] Moved {moved} part(s) into folder "{title}" '
                 f"({folder_url(dest_folder_id)})"
             )
+
+        cover = Path(cover_image_path) if cover_image_path else None
+        if cover and cover.is_file():
+            try:
+                set_folder_thumbnail(dest_folder_id, str(cover))
+                if on_log:
+                    on_log(f"[Filester] Folder thumbnail set for {title}")
+            except Exception as exc:  # noqa: BLE001
+                if on_log:
+                    on_log(f"[Filester] Folder thumbnail upload failed: {exc}")
+                print(f"[FILESTER] folder thumbnail failed for {title}: {exc}", flush=True)
+
         return dest_folder_id
     except Exception as e:  # noqa: BLE001
         if on_log:
@@ -698,6 +726,7 @@ def rename_split_upload_folder_for_stashdb(
     parent_folder_id: str,
     scene_title: str,
     upload_responses: list[dict],
+    cover_image_path: str | Path | None = None,
     on_log=None,
     temp_folder_id: str | None = None,
 ) -> str:
@@ -711,6 +740,8 @@ def rename_split_upload_folder_for_stashdb(
     return organize_split_parts_into_folder(
         parent_folder_id=parent_folder_id,
         folder_name=scene_title,
+        folder_title=scene_title,
+        cover_image_path=cover_image_path,
         upload_responses=upload_responses,
         blacklist_label=f"split upload: {title} (StashDB)",
         on_log=on_log,

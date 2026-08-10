@@ -3,17 +3,16 @@
 No re-encoding ever happens: every part is produced with ``-c copy`` and keeps
 the source container/codecs. Parts are named ``<name>.PART1.<ext>``,
 ``<name>.PART2.<ext>`` ... and each is independently playable. Splits are
-aligned to video keyframes so parts rejoin cleanly with stream-copy concat (no
-re-encode). The ``ffmpeg_slice`` path uses mkvmerge time boundaries streamed
-through a fifo into ffmpeg remux (~source + one part on disk). Rejoin with the
-**concat demuxer** and stream copy (not the concat filter — that re-encodes):
+aligned to video keyframes so parts rejoin cleanly (no re-encode). The
+``ffmpeg_slice`` path extracts one part at a time (~source + one part on disk);
+default backend is ffmpeg input seek, with legacy mkvmerge fifo available via
+``SPLITTER_EXTRACT_BACKEND=mkvmerge``. Rejoin for phash-identical output::
 
-    # list.txt — one ``file 'path'`` line per part, in order
-    ffmpeg -f concat -safe 0 -i list.txt -c copy movie.mkv
+    mkvmerge -o movie.mp4 movie.PART1.mp4 +movie.PART2.mp4 +movie.PART3.mp4
 
-Or the concat protocol shortcut when all parts share one directory:
+Or with ffmpeg concat demuxer (stream copy, may differ from source phash)::
 
-    ffmpeg -f concat -safe 0 -i "concat:movie.PART1.mkv|movie.PART2.mkv" -c copy movie.mkv
+    ffmpeg -f concat -safe 0 -i parts.txt -c copy movie.mp4
 
 Used in-process by apu and by the splitter-http sidecar.
 """
@@ -34,6 +33,61 @@ _SPARSE_INITIAL_WINDOW_SEC = 180.0
 _SPARSE_MAX_WINDOW_SEC = 300.0
 _SPARSE_LOOKBACK_SEC = 30.0
 _SPARSE_FORWARD_STEP_SEC = 150.0
+_FULL_SCAN_MAX_BYTES = 15 * 1024**3
+_PROBE_SIZE_MARGIN = 1.10
+_PROBE_SKIP_ESTIMATE_RATIO = 0.85
+_MIN_SEGMENT_TIMEOUT_SEC = 300
+_EXTRACT_FLOOR_BPS = 2 * 1024 * 1024  # pessimistic VPS read+write for stream copy
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+FFPROBE_KEYFRAME_TIMEOUT = max(60, _env_int("SPLITTER_FFPROBE_TIMEOUT_SEC", 300))
+SPLITTER_EXTRACT_BACKEND = (
+    (os.environ.get("SPLITTER_EXTRACT_BACKEND") or "ffmpeg").strip().lower() or "ffmpeg"
+)
+
+
+def _scaled_segment_timeout(
+    segment_sec: float,
+    file_size: int,
+    duration: float,
+    max_timeout: int,
+) -> int:
+    """Cap per-segment extract time from segment bytes, not the global default."""
+    if segment_sec <= 0 or duration <= 0 or file_size <= 0:
+        return min(max_timeout, _MIN_SEGMENT_TIMEOUT_SEC)
+    segment_bytes = int(file_size * (segment_sec / duration))
+    io_budget = segment_bytes / _EXTRACT_FLOOR_BPS
+    scaled = int(max(_MIN_SEGMENT_TIMEOUT_SEC, io_budget * 2.0))
+    return min(max_timeout, scaled)
+
+
+def _probe_timeout_for_file(file_size: int, configured: int) -> int:
+    """Scale ffprobe keyframe probes down on huge files so planning fails fast."""
+    size_gb = file_size / (1024**3)
+    per_gb = max(60, configured // 4)
+    return min(configured, max(60, int(size_gb * per_gb)))
+
+
+def format_mkvmerge_rejoin_command(
+    stem: str,
+    ext: str,
+    part_count: int,
+    *,
+    output_name: str | None = None,
+) -> str:
+    """Single mkvmerge command to rejoin playable PART files (phash-identical)."""
+    out = output_name or f"{stem}{ext}"
+    parts = [f"{stem}.PART{i}{ext}" for i in range(1, part_count + 1)]
+    if part_count <= 1:
+        return parts[0]
+    return f"{MKVMERGE_BIN} -o {out} {parts[0]} " + " ".join(f"+{p}" for p in parts[1:])
 
 
 class SplitError(RuntimeError):
@@ -98,7 +152,7 @@ def _parse_keyframe_times(stdout: str) -> list[float]:
     return times
 
 
-def _keyframes_from_packets(path: str) -> list[float]:
+def _keyframes_from_packets(path: str, *, probe_timeout: int = 3600) -> list[float]:
     proc = subprocess.run(
         [
             FFPROBE_BIN,
@@ -114,7 +168,7 @@ def _keyframes_from_packets(path: str) -> list[float]:
         ],
         capture_output=True,
         text=True,
-        timeout=3600,
+        timeout=probe_timeout,
     )
     if proc.returncode != 0:
         return []
@@ -136,7 +190,7 @@ def _keyframes_from_packets(path: str) -> list[float]:
     return times
 
 
-def probe_keyframe_times(path: str) -> list[float]:
+def probe_keyframe_times(path: str, *, probe_timeout: int = 3600) -> list[float]:
     """Return sorted presentation timestamps of video keyframes."""
     proc = subprocess.run(
         [
@@ -155,7 +209,7 @@ def probe_keyframe_times(path: str) -> list[float]:
         ],
         capture_output=True,
         text=True,
-        timeout=3600,
+        timeout=probe_timeout,
     )
     if proc.returncode != 0:
         tail = (proc.stderr or "")[-400:]
@@ -163,7 +217,7 @@ def probe_keyframe_times(path: str) -> list[float]:
 
     times = _parse_keyframe_times(proc.stdout or "")
     if not times:
-        times = _keyframes_from_packets(path)
+        times = _keyframes_from_packets(path, probe_timeout=probe_timeout)
 
     if not times:
         raise SplitError(f"No video keyframes found in {os.path.basename(path)}")
@@ -189,6 +243,7 @@ def _keyframes_from_packets_in_interval(
     *,
     start_sec: float,
     end_sec: float,
+    probe_timeout: int = 600,
 ) -> list[float]:
     proc = subprocess.run(
         [
@@ -207,7 +262,7 @@ def _keyframes_from_packets_in_interval(
         ],
         capture_output=True,
         text=True,
-        timeout=600,
+        timeout=probe_timeout,
     )
     if proc.returncode != 0:
         return []
@@ -235,6 +290,7 @@ def _probe_keyframes_in_interval(
     start_sec: float,
     end_sec: float,
     duration: float,
+    probe_timeout: int = 300,
 ) -> list[float]:
     if duration <= 0:
         return []
@@ -263,7 +319,7 @@ def _probe_keyframes_in_interval(
         ],
         capture_output=True,
         text=True,
-        timeout=600,
+        timeout=probe_timeout,
     )
     if proc.returncode != 0:
         tail = (proc.stderr or "")[-400:]
@@ -274,7 +330,7 @@ def _probe_keyframes_in_interval(
     times = _parse_keyframe_times(proc.stdout or "")
     if not times:
         times = _keyframes_from_packets_in_interval(
-            path, start_sec=start_sec, end_sec=end_sec
+            path, start_sec=start_sec, end_sec=end_sec, probe_timeout=probe_timeout
         )
     return sorted(set(times))
 
@@ -291,6 +347,8 @@ def find_keyframe_at_or_after(
     target_segment_time: float,
     *,
     cache: _KeyframeCache | None = None,
+    probe_timeout: int = 300,
+    file_size: int = 0,
 ) -> float | None:
     if duration <= 0:
         return None
@@ -310,7 +368,8 @@ def find_keyframe_at_or_after(
     while cursor < duration - _KEYFRAME_EPS:
         end = min(duration, cursor + window)
         times = _probe_keyframes_in_interval(
-            path, start_sec=cursor, end_sec=end, duration=duration
+            path, start_sec=cursor, end_sec=end, duration=duration,
+            probe_timeout=probe_timeout,
         )
         if cache is not None:
             cache.add(times)
@@ -323,7 +382,14 @@ def find_keyframe_at_or_after(
             break
         cursor = max(cursor + _SPARSE_FORWARD_STEP_SEC, end - _SPARSE_LOOKBACK_SEC)
 
-    full = probe_keyframe_times(path)
+    if file_size > _FULL_SCAN_MAX_BYTES:
+        raise SplitError(
+            f"Sparse keyframe lookup missed target {target_sec:.3f}s in "
+            f"{os.path.basename(path)}; refusing full-file ffprobe on "
+            f"{file_size / (1024**3):.1f} GiB source"
+        )
+
+    full = probe_keyframe_times(path, probe_timeout=probe_timeout * 3)
     if cache is not None:
         cache.add(full)
     return _select_keyframe_at_or_after(full, target_sec)
@@ -371,6 +437,9 @@ def plan_sparse_keyframe_part_starts(
     path: str,
     duration: float,
     target_segment_time: float,
+    *,
+    probe_timeout: int = 300,
+    file_size: int = 0,
 ) -> list[float]:
     """Plan part starts by probing only near each split boundary."""
     if duration <= 0:
@@ -384,7 +453,8 @@ def plan_sparse_keyframe_part_starts(
             break
 
         next_start = find_keyframe_at_or_after(
-            path, target, duration, target_segment_time, cache=cache
+            path, target, duration, target_segment_time, cache=cache,
+            probe_timeout=probe_timeout, file_size=file_size,
         )
         if next_start is None:
             break
@@ -395,6 +465,8 @@ def plan_sparse_keyframe_part_starts(
                 duration,
                 target_segment_time,
                 cache=cache,
+                probe_timeout=probe_timeout,
+                file_size=file_size,
             )
             if next_start is None or next_start <= starts[-1] + _KEYFRAME_EPS:
                 break
@@ -680,7 +752,7 @@ def iter_upload_parts(
             pass
 
 
-def _extract_single_segment(
+def _extract_single_segment_mkvmerge(
     path: str,
     output_path: str,
     start_sec: float,
@@ -691,7 +763,7 @@ def _extract_single_segment(
     on_log=None,
     should_cancel=None,
 ) -> None:
-    """Extract ``[start_sec, end_sec)`` via mkvmerge → fifo → ffmpeg (no temp file)."""
+    """Extract ``[start_sec, end_sec)`` via mkvmerge → fifo → ffmpeg (legacy, slow on MP4)."""
     if end_sec - start_sec <= _KEYFRAME_EPS:
         raise SplitError(
             f"Refusing zero-length segment for {os.path.basename(output_path)} "
@@ -753,17 +825,15 @@ def _extract_single_segment(
             raise SplitError(f"mkvmerge timed out after {timeout}s") from exc
 
         assert ff_proc is not None
-        while ff_proc.poll() is None:
-            _check_cancel(should_cancel)
-            if time.time() > deadline:
-                ff_proc.kill()
-                ff_proc.communicate()
-                raise SplitError(f"ffmpeg timed out after {timeout}s")
-            time.sleep(0.25)
-        _, ff_stderr = ff_proc.communicate()
+        try:
+            _, ff_stderr = ff_proc.communicate(timeout=max(1, int(deadline - time.time())))
+        except subprocess.TimeoutExpired as exc:
+            ff_proc.kill()
+            ff_proc.communicate()
+            raise SplitError(f"ffmpeg timed out after {timeout}s") from exc
 
         if ff_proc.returncode != 0:
-            tail = ff_stderr[-600:]
+            tail = (ff_stderr or "")[-600:]
             mkv_tail = (mkv_proc.stderr or mkv_proc.stdout or "")[-300:]
             raise SplitError(
                 f"ffmpeg remux failed (exit {ff_proc.returncode}) for "
@@ -791,6 +861,93 @@ def _extract_single_segment(
             pass
 
 
+def _extract_single_segment_ffmpeg(
+    path: str,
+    output_path: str,
+    start_sec: float,
+    end_sec: float,
+    *,
+    duration: float,
+    timeout: int,
+    on_log=None,
+    should_cancel=None,
+) -> None:
+    """Extract ``[start_sec, end_sec)`` via ffmpeg input seek + stream copy (fast on MP4)."""
+    if end_sec - start_sec <= _KEYFRAME_EPS:
+        raise SplitError(
+            f"Refusing zero-length segment for {os.path.basename(output_path)} "
+            f"({start_sec:.3f}s–{end_sec:.3f}s)"
+        )
+
+    cmd = [
+        FFMPEG_BIN,
+        "-hide_banner",
+        "-y",
+        "-ss",
+        f"{start_sec:.6f}",
+    ]
+    if end_sec < duration - _KEYFRAME_EPS:
+        cmd.extend(["-to", f"{end_sec:.6f}"])
+    cmd.extend(
+        [
+            "-i",
+            path,
+            *_copy_stream_maps(),
+            "-c",
+            "copy",
+            "-movflags",
+            "+faststart",
+            output_path,
+        ]
+    )
+    if on_log:
+        on_log(
+            f"ffmpeg stream-copy {os.path.basename(output_path)} "
+            f"{start_sec:.3f}s–{end_sec:.3f}s (timeout {timeout}s)"
+        )
+    _run_ffmpeg_logged(cmd, timeout=timeout, on_log=on_log, should_cancel=should_cancel)
+
+
+def _extract_single_segment(
+    path: str,
+    output_path: str,
+    start_sec: float,
+    end_sec: float,
+    *,
+    duration: float,
+    file_size: int,
+    max_timeout: int,
+    extract_backend: str | None = None,
+    on_log=None,
+    should_cancel=None,
+) -> None:
+    segment_sec = end_sec - start_sec
+    seg_timeout = _scaled_segment_timeout(segment_sec, file_size, duration, max_timeout)
+    backend = (extract_backend or SPLITTER_EXTRACT_BACKEND or "ffmpeg").strip().lower()
+    if backend == "mkvmerge":
+        _extract_single_segment_mkvmerge(
+            path,
+            output_path,
+            start_sec,
+            end_sec,
+            duration=duration,
+            timeout=seg_timeout,
+            on_log=on_log,
+            should_cancel=should_cancel,
+        )
+        return
+    _extract_single_segment_ffmpeg(
+        path,
+        output_path,
+        start_sec,
+        end_sec,
+        duration=duration,
+        timeout=seg_timeout,
+        on_log=on_log,
+        should_cancel=should_cancel,
+    )
+
+
 def iter_upload_parts_sliced(
     path: str,
     max_bytes: int,
@@ -799,12 +956,15 @@ def iter_upload_parts_sliced(
     on_log=None,
     should_cancel=None,
     delete_source: bool = True,
-    ffmpeg_timeout: int = 7200,
+    ffmpeg_timeout: int = 1800,
+    ffprobe_keyframe_timeout: int | None = None,
+    extract_backend: str | None = None,
 ):
-    """Yield one mkvmerge/ffmpeg part at a time (~source + one part on disk).
+    """Yield one ffmpeg-sliced part at a time (~source + one part on disk).
 
     Parts use playable names (``movie.PART1.mp4``). Segment duration is tuned
     using sparse keyframe probes; the first part is extracted before uploads begin.
+    Rejoin with :func:`format_mkvmerge_rejoin_command` for phash-identical output.
     """
     size = os.path.getsize(path)
     if size <= max_bytes:
@@ -825,6 +985,10 @@ def iter_upload_parts_sliced(
     stem, ext = os.path.splitext(base)
     duration = probe_duration(path)
     bytes_per_sec = size / duration
+    probe_timeout = _probe_timeout_for_file(
+        size, ffprobe_keyframe_timeout or FFPROBE_KEYFRAME_TIMEOUT
+    )
+    backend = extract_backend or SPLITTER_EXTRACT_BACKEND
 
     segment_time = None
     part_starts = None
@@ -836,10 +1000,12 @@ def iter_upload_parts_sliced(
         trial_segment_time = max(1, int(target_bytes / bytes_per_sec))
         if on_log:
             on_log(
-                f"Planning sparse keyframe split (~{trial_segment_time}s target, factor {factor})"
+                f"Planning sparse keyframe split for {base} "
+                f"(~{trial_segment_time}s target, factor {factor})"
             )
         trial_starts = plan_sparse_keyframe_part_starts(
-            path, duration, trial_segment_time
+            path, duration, trial_segment_time,
+            probe_timeout=probe_timeout, file_size=size,
         )
         probe_name = f"{stem}.PART1{ext}"
         probe_path = os.path.join(output_dir, probe_name)
@@ -850,21 +1016,33 @@ def iter_upload_parts_sliced(
             pass
 
         first_end = trial_starts[1] if len(trial_starts) > 1 else duration
-        _extract_single_segment(
-            path,
-            probe_path,
-            0,
-            first_end,
-            duration=duration,
-            timeout=ffmpeg_timeout,
-            on_log=on_log,
-            should_cancel=should_cancel,
-        )
-        probe_size = os.path.getsize(probe_path)
-        try:
-            os.remove(probe_path)
-        except OSError:
-            pass
+        est_probe_size = int((first_end - trial_starts[0]) * bytes_per_sec * _PROBE_SIZE_MARGIN)
+        probe_skip_threshold = int(max_bytes * _PROBE_SKIP_ESTIMATE_RATIO)
+        if est_probe_size > probe_skip_threshold:
+            _extract_single_segment(
+                path,
+                probe_path,
+                0,
+                first_end,
+                duration=duration,
+                file_size=size,
+                max_timeout=ffmpeg_timeout,
+                extract_backend=backend,
+                on_log=on_log,
+                should_cancel=should_cancel,
+            )
+            probe_size = os.path.getsize(probe_path)
+            try:
+                os.remove(probe_path)
+            except OSError:
+                pass
+        else:
+            if on_log:
+                on_log(
+                    f"Skipping probe slice (est {est_probe_size:,} bytes "
+                    f"≤ {probe_skip_threshold:,} threshold)"
+                )
+            probe_size = est_probe_size
 
         if probe_size > max_bytes:
             last_err = (
@@ -900,13 +1078,17 @@ def iter_upload_parts_sliced(
 
         part_name = f"{stem}.PART{idx + 1}{ext}"
         part_path = os.path.join(output_dir, part_name)
+        if on_log:
+            on_log(f"Splitting part {idx + 1}/{num_parts}: {part_name}")
         _extract_single_segment(
             path,
             part_path,
             start,
             end,
             duration=duration,
-            timeout=ffmpeg_timeout,
+            file_size=size,
+            max_timeout=ffmpeg_timeout,
+            extract_backend=backend,
             on_log=on_log,
             should_cancel=should_cancel,
         )

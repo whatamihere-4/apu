@@ -37,7 +37,11 @@ DOWNLOADS_DIR = os.path.realpath(
     (os.environ.get("MEDIA_DOWNLOADS_DIR") or "./downloads").rstrip("/") or "./downloads"
 )
 FILESTER_MAX_PART_BYTES = _env_int("FILESTER_MAX_PART_BYTES", 10_200_547_328)
-FILESTER_FFMPEG_TIMEOUT = _env_int("SPLITTER_FFMPEG_TIMEOUT_SEC", 7200)
+FILESTER_FFMPEG_TIMEOUT = max(300, _env_int("SPLITTER_FFMPEG_TIMEOUT_SEC", 1800))
+FILESTER_FFPROBE_TIMEOUT = max(60, _env_int("SPLITTER_FFPROBE_TIMEOUT_SEC", 300))
+SPLITTER_EXTRACT_BACKEND = (
+    (os.environ.get("SPLITTER_EXTRACT_BACKEND") or "ffmpeg").strip().lower() or "ffmpeg"
+)
 
 _SPLIT_MODE_ALIASES = {
     "splice": "bytes",
@@ -335,6 +339,8 @@ def _upload_filester_parts(
             should_cancel=should_cancel,
             delete_source=delete_source,
             ffmpeg_timeout=FILESTER_FFMPEG_TIMEOUT,
+            ffprobe_keyframe_timeout=FILESTER_FFPROBE_TIMEOUT,
+            extract_backend=SPLITTER_EXTRACT_BACKEND,
         )
     else:
         part_source = byte_splitter.iter_upload_parts(
@@ -391,11 +397,20 @@ def _upload_filester_parts(
             original = f"{stem}{ext}"
             mode = last_part.get("split_mode") or split_mode
             if mode in ("ffmpeg", "ffmpeg_slice"):
-                on_log(
-                    f"[Filester] Split into {last_part['part_count']} playable parts. "
-                    f"Rejoin: printf \"file '%s'\\n\" {stem}.PART*{ext} > parts.txt && "
-                    f"ffmpeg -f concat -safe 0 -i parts.txt -c copy {original}"
-                )
+                if mode == "ffmpeg_slice":
+                    rejoin = file_splitter.format_mkvmerge_rejoin_command(
+                        stem, ext, last_part["part_count"], output_name=original,
+                    )
+                    on_log(
+                        f"[Filester] Split into {last_part['part_count']} playable parts. "
+                        f"Rejoin (phash-identical): {rejoin}"
+                    )
+                else:
+                    on_log(
+                        f"[Filester] Split into {last_part['part_count']} playable parts. "
+                        f"Rejoin: printf \"file '%s'\\n\" {stem}.PART*{ext} > parts.txt && "
+                        f"ffmpeg -f concat -safe 0 -i parts.txt -c copy {original}"
+                    )
             else:
                 on_log(
                     f"[Filester] Split into {last_part['part_count']} parts. "

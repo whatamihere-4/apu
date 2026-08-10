@@ -46,7 +46,6 @@ from filester_upload import (
     apply_folder_blacklist,
     fetch_folder_map_from_api,
     organize_split_parts_into_folder,
-    rename_split_upload_folder_for_stashdb,
 )
 from oshash_remote import fetch_oshash_from_url
 from queue_persist import track_add, track_remove
@@ -2742,6 +2741,82 @@ def _stashdb_largest_image_url(scene):
     return best or None
 
 
+_STASHDB_COVER_MAX_BYTES = 5 * 1024 * 1024
+_STASHDB_SCENE_IMAGES_QUERY = """
+query SceneImages($id: ID!) {
+  findScene(id: $id) {
+    id
+    images { id url width height }
+  }
+}
+"""
+
+
+def _stashdb_largest_image_url_for_scene_id(scene_id: str) -> str | None:
+    sid = (scene_id or "").strip()
+    if not sid or not STASHDB_API_KEY:
+        return None
+    try:
+        data = _stashdb_graphql(_STASHDB_SCENE_IMAGES_QUERY, {"id": sid})
+    except Exception as exc:  # noqa: BLE001
+        print(f"[STASHDB] scene images query failed for {sid}: {exc}", flush=True)
+        return None
+    scene = data.get("findScene")
+    return _stashdb_largest_image_url(scene) if isinstance(scene, dict) else None
+
+
+def _stashdb_cover_extension(url: str, content_type: str | None) -> str:
+    ct = (content_type or "").split(";")[0].strip().lower()
+    mapping = {
+        "image/jpeg": ".jpg",
+        "image/jpg": ".jpg",
+        "image/png": ".png",
+        "image/gif": ".gif",
+        "image/webp": ".webp",
+    }
+    if ct in mapping:
+        return mapping[ct]
+    path = urllib.parse.urlparse(url).path
+    suffix = os.path.splitext(path)[1].lower()
+    if suffix in (".jpg", ".jpeg", ".png", ".gif", ".webp"):
+        return suffix if suffix != ".jpeg" else ".jpg"
+    guessed = mimetypes.guess_extension(ct or "")
+    if guessed:
+        return ".jpg" if guessed == ".jpe" else guessed
+    return ".jpg"
+
+
+def _stashdb_download_cover(scene_id: str, cache_dir: str) -> str | None:
+    """Download the largest StashDB scene image for a folder thumbnail."""
+    image_url = _stashdb_largest_image_url_for_scene_id(scene_id)
+    if not image_url:
+        return None
+    os.makedirs(cache_dir, exist_ok=True)
+    try:
+        resp = requests.get(image_url, timeout=30)
+        resp.raise_for_status()
+        content = resp.content
+        content_type = resp.headers.get("content-type")
+    except requests.RequestException as exc:
+        print(f"[STASHDB] cover download failed: {exc}", flush=True)
+        return None
+    if len(content) > _STASHDB_COVER_MAX_BYTES:
+        print(
+            f"[STASHDB] cover too large ({len(content):,} bytes); skipping thumbnail",
+            flush=True,
+        )
+        return None
+    ext = _stashdb_cover_extension(image_url, content_type)
+    dest = os.path.join(cache_dir, f"{scene_id}{ext}")
+    try:
+        with open(dest, "wb") as fp:
+            fp.write(content)
+    except OSError as exc:
+        print(f"[STASHDB] cover write failed: {exc}", flush=True)
+        return None
+    return dest
+
+
 def _stashdb_autofill_payload_from_scene(scene):
     """BBCode autofill fields from a findScene-shaped dict (or synthetic merge)."""
     actresses = []
@@ -4942,6 +5017,15 @@ def _stashdb_post_upload_check(job_id, downloaded_path, *, parallel_with_upload:
             "performers": matched_scene.get("performers") or [],
         }
         job["stashdb_match"] = match_payload
+        cover_path = _stashdb_download_cover(
+            matched_scene.get("id") or "",
+            os.path.join(HASHES_DIR, "stashdb-covers"),
+        )
+        if cover_path:
+            job["stashdb_cover_path"] = cover_path
+            _append_hasher_log(job_id, "StashDB cover cached for folder thumbnail")
+        else:
+            job.pop("stashdb_cover_path", None)
         job["stashdb_helper_url"] = _bbcode_helper_url(
             matched_scene["id"], filename, _scenes_get(filename, expected_size=size) or entry
         )
@@ -6127,27 +6211,29 @@ def _finalize_upload(
         ]
         match = job.get("stashdb_match") or {}
         scene_title = (match.get("title") or "").strip()
+        cover_path = job.get("stashdb_cover_path")
         log_fn = lambda ln: _append_job_log(job_id, ln)
         if studio_folder_id and filester_raws:
-            if scene_title:
-                effective_filester_folder = rename_split_upload_folder_for_stashdb(
-                    parent_folder_id=studio_folder_id,
-                    scene_title=scene_title,
-                    upload_responses=filester_raws,
-                    on_log=log_fn,
-                )
-            else:
-                stem, _ext = os.path.splitext(
-                    split_info.get("original_basename") or ""
-                )
-                fallback_name = stem or (job.get("source_filename") or "upload")
-                effective_filester_folder = organize_split_parts_into_folder(
-                    parent_folder_id=studio_folder_id,
-                    folder_name=fallback_name,
-                    upload_responses=filester_raws,
-                    blacklist_label=f"split upload: {fallback_name}",
-                    on_log=log_fn,
-                )
+            original = (
+                split_info.get("original_basename")
+                or job.get("source_filename")
+                or "upload"
+            )
+            stem, _ext = os.path.splitext(os.path.basename(original))
+            fallback_name = stem or "upload"
+            effective_filester_folder = organize_split_parts_into_folder(
+                parent_folder_id=studio_folder_id,
+                folder_name=fallback_name,
+                folder_title=scene_title or None,
+                cover_image_path=cover_path if scene_title else None,
+                upload_responses=filester_raws,
+                blacklist_label=(
+                    f"split upload: {scene_title} (StashDB)"
+                    if scene_title
+                    else f"split upload: {fallback_name}"
+                ),
+                on_log=log_fn,
+            )
 
     gofile_url = gofile_urls[0] if gofile_urls else ""
     if filester_part_urls:
