@@ -25,6 +25,9 @@ FILESTER_API_KEY = os.environ.get("FILESTER_API_KEY", "")
 FILESTER_BASE_URL = (os.environ.get("FILESTER_BASE_URL") or "https://u1.filester.me").rstrip("/")
 # Public download page host (the API base is an upload node, e.g. u1.filester.me).
 FILESTER_SITE_URL = (os.environ.get("FILESTER_SITE_URL") or "https://filester.me").rstrip("/")
+# Studio folders live as direct children of this container (see migradora FILESTER_ROOT_*).
+FILESTER_ROOT_FOLDER_ID = (os.environ.get("FILESTER_ROOT_FOLDER_ID") or "").strip()
+FILESTER_ROOT_FOLDER_NAME = (os.environ.get("FILESTER_ROOT_FOLDER_NAME") or "VR").strip()
 
 _FOLDER_NAME_MAX = 100
 
@@ -34,6 +37,25 @@ def _auth_headers():
     if FILESTER_API_KEY:
         h["Authorization"] = f"Bearer {FILESTER_API_KEY}"
     return h
+
+
+def _folder_row_id(row: dict) -> str:
+    return str(row.get("id") or row.get("identifier") or "").strip()
+
+
+def _parse_parent_identifier(row: dict) -> str | None:
+    """Parent folder id from a GET /api/v1/folders row (None = account root)."""
+    parent = row.get("parent")
+    if isinstance(parent, str):
+        value = parent.strip()
+        if value and value.lower() != "root":
+            return value
+    parent_id = row.get("parent_id")
+    if isinstance(parent_id, str):
+        value = parent_id.strip()
+        if value and value.lower() != "root" and not value.isdigit():
+            return value
+    return None
 
 
 def _iter_folder_rows(rows: list, *, recurse: bool = True):
@@ -50,13 +72,54 @@ def _iter_folder_rows(rows: list, *, recurse: bool = True):
                 yield from _iter_folder_rows(children, recurse=recurse)
 
 
-def _flatten_folder_rows(rows: list, out: dict[str, str], *, recurse: bool = True) -> None:
-    """Collect {id: name} from Filester folder list payloads."""
-    for item in _iter_folder_rows(rows, recurse=recurse):
-        fid = str(item.get("id") or item.get("identifier") or "").strip()
-        name = str(item.get("name") or "").strip()
-        if fid and name:
-            out[fid] = name
+def _fetch_raw_folder_rows() -> list[dict]:
+    """Download every folder row from GET /api/v1/folders (flat list or nested tree)."""
+    if not FILESTER_API_KEY:
+        raise RuntimeError("FILESTER_API_KEY is not set")
+    url = f"{FILESTER_BASE_URL}/api/v1/folders"
+    r = requests.get(url, headers=_auth_headers(), timeout=60)
+    r.raise_for_status()
+    body = r.json()
+    if not body.get("success"):
+        raise RuntimeError(f"Filester folders API failed: {body}")
+    rows = body.get("data")
+    if not isinstance(rows, list):
+        raise RuntimeError(f"Unexpected Filester folders response: {body!r}")
+    return list(_iter_folder_rows(rows, recurse=True))
+
+
+def _resolve_vr_root_folder_id(rows: list[dict]) -> str:
+    """Return the VR container folder id (env override, then name match)."""
+    if FILESTER_ROOT_FOLDER_ID:
+        return FILESTER_ROOT_FOLDER_ID
+    if not FILESTER_ROOT_FOLDER_NAME:
+        return ""
+    name_fold = FILESTER_ROOT_FOLDER_NAME.casefold()
+    for row in rows:
+        row_name = str(row.get("name") or "").strip()
+        if row_name.casefold() == name_fold and not _parse_parent_identifier(row):
+            return _folder_row_id(row)
+    for row in rows:
+        row_name = str(row.get("name") or "").strip()
+        if row_name.casefold() == name_fold:
+            return _folder_row_id(row)
+    return ""
+
+
+def _filter_sync_folder_rows(rows: list[dict], *, include_children: bool) -> list[dict]:
+    """Select folder rows for filester-folders.json sync.
+
+    ``include_children=True`` (default): direct children of the VR root — studio
+    folders only, not split-upload subfolders nested deeper.
+    ``include_children=False``: account root folders only (legacy).
+    """
+    if not include_children:
+        return [row for row in rows if not _parse_parent_identifier(row)]
+
+    vr_id = _resolve_vr_root_folder_id(rows)
+    if not vr_id:
+        return [row for row in rows if not _parse_parent_identifier(row)]
+    return [row for row in rows if _parse_parent_identifier(row) == vr_id]
 
 
 def sanitize_folder_name(name: str, *, max_len: int = _FOLDER_NAME_MAX) -> str:
@@ -71,29 +134,19 @@ def sanitize_folder_name(name: str, *, max_len: int = _FOLDER_NAME_MAX) -> str:
 
 
 def fetch_folders_from_api(*, include_children: bool = True) -> list[dict]:
-    """Return raw folder rows from GET /api/v1/folders (nested tree flattened)."""
-    if not FILESTER_API_KEY:
-        raise RuntimeError("FILESTER_API_KEY is not set")
-    url = f"{FILESTER_BASE_URL}/api/v1/folders"
-    r = requests.get(url, headers=_auth_headers(), timeout=60)
-    r.raise_for_status()
-    body = r.json()
-    if not body.get("success"):
-        raise RuntimeError(f"Filester folders API failed: {body}")
-    rows = body.get("data")
-    if not isinstance(rows, list):
-        raise RuntimeError(f"Unexpected Filester folders response: {body!r}")
-    return list(_iter_folder_rows(rows, recurse=include_children))
+    """Return folder rows selected for sync (studio folders under VR by default)."""
+    rows = _fetch_raw_folder_rows()
+    return _filter_sync_folder_rows(rows, include_children=include_children)
 
 
 def find_folder_row(folder_id: str, *, include_children: bool = True) -> dict | None:
-    """Return one folder row from GET /api/v1/folders, searching nested children."""
+    """Return one folder row from GET /api/v1/folders (searches the full account tree)."""
+    _ = include_children
     fid = (folder_id or "").strip()
     if not fid:
         return None
-    for row in fetch_folders_from_api(include_children=include_children):
-        row_id = str(row.get("id") or row.get("identifier") or "").strip()
-        if row_id == fid:
+    for row in _fetch_raw_folder_rows():
+        if _folder_row_id(row) == fid:
             return row
     return None
 
@@ -117,16 +170,16 @@ def folder_thumbnail_url(folder_row: dict) -> str:
 
 
 def fetch_folder_map_from_api(*, include_children: bool = True) -> dict[str, str]:
-    """Download the account folder map from GET /api/v1/folders.
+    """Download studio folder map from GET /api/v1/folders.
 
-    Recurses the full tree by default so nested studio folders (e.g. under a
-    root VR container) are included. Callers should filter with
-    :func:`load_folder_blacklist` to drop split-upload subfolders and any
-    container folders you do not use as upload targets.
+    By default returns only direct children of the VR root folder (studio
+    folders), not split-upload subfolders nested under studios. Set
+    ``FILESTER_ROOT_FOLDER_ID`` when auto-detection by name is not enough.
+    Callers should still apply :func:`apply_folder_blacklist`.
     """
     out: dict[str, str] = {}
     for row in fetch_folders_from_api(include_children=include_children):
-        fid = str(row.get("id") or row.get("identifier") or "").strip()
+        fid = _folder_row_id(row)
         name = str(row.get("name") or "").strip()
         if fid and name:
             out[fid] = name
