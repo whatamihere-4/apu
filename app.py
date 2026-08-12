@@ -209,12 +209,16 @@ FILESTER_FOLDER_SYNC_INCLUDE_CHILDREN = _env_yes(
 
 
 GOONBOX_BASE_URL = (os.environ.get("GOONBOX_BASE_URL") or "https://goonbox.cr").rstrip("/")
+PIXHOST_ENABLED = _env_yes("PIXHOST_ENABLED", default="1")
+PIXHOST_API_URL = (os.environ.get("PIXHOST_API_URL") or "https://api.pixhost.cc").rstrip("/")
 SLR_GIF_FPS = _env_int("SLR_GIF_FPS", 12)
 SLR_GIF_WIDTH = _env_int("SLR_GIF_WIDTH", 480)
 SLR_GIF_MAX_DURATION = _env_int("SLR_GIF_MAX_DURATION", 15)
 SLR_GIF_MAX_BYTES = _env_int("SLR_GIF_MAX_BYTES", 26_214_400)
 # GoonBox animated cap (width × height × frames); matches GET /api/upload/config.
 SLR_GIF_MAX_ANIMATED_PIXELS = _env_int("SLR_GIF_MAX_ANIMATED_PIXELS", 50_000_000)
+# Undocumented GoonBox GIF frame cap (default 120).
+SLR_GIF_MAX_FRAMES = _env_int("SLR_GIF_MAX_FRAMES", 120)
 JOB_LINKS_FILENAME_ONLY = _env_yes("JOB_LINKS_FILENAME_ONLY", default="0")
 HASHER_ALGORITHMS = ("OSHASH", "MD5", "PHASH")
 
@@ -1766,6 +1770,7 @@ def bbcode_page():
         filester_split_mode=FILESTER_SPLIT_MODE,
         stashdb_scenes_base=STASHDB_SCENES_BASE,
         goonbox_base_url=GOONBOX_BASE_URL,
+        pixhost_enabled=PIXHOST_ENABLED,
     )
 
 
@@ -5685,9 +5690,12 @@ def _ffprobe_gif_animated_pixels(path: str) -> tuple[int, int, int, int]:
         return 0, 0, 0, 0
 
 
+def _slr_gif_frame_count(fps: int, duration: int) -> int:
+    return max(1, fps) * max(1, duration)
+
+
 def _slr_gif_animated_pixels(width: int, height: int, fps: int, duration: int) -> int:
-    frames = max(1, fps) * max(1, duration)
-    return max(1, width) * max(1, height) * frames
+    return max(1, width) * max(1, height) * _slr_gif_frame_count(fps, duration)
 
 
 def _clamp_slr_gif_params(
@@ -5698,11 +5706,13 @@ def _clamp_slr_gif_params(
     duration: int,
     *,
     max_pixels: int,
+    max_frames: int,
 ) -> tuple[int, int, int, int]:
-    """Fit SLR GIF encode params under GoonBox animated pixel cap (W×H×frames)."""
+    """Fit SLR GIF encode params under GoonBox frame and animated-pixel caps."""
     fps = max(1, min(fps, 60))
     width = max(120, min(width, 1920))
     duration = max(1, min(duration, 60))
+    max_frames = max(1, max_frames)
 
     if src_w <= 0 or src_h <= 0:
         out_h = width
@@ -5713,6 +5723,11 @@ def _clamp_slr_gif_params(
         h = max(1, int(round(w * src_h / src_w))) if src_w > 0 and src_h > 0 else w
         return _slr_gif_animated_pixels(w, h, f, d)
 
+    while _slr_gif_frame_count(fps, duration) > max_frames and duration > 1:
+        duration -= 1
+    while _slr_gif_frame_count(fps, duration) > max_frames and fps > 1:
+        fps -= 1
+
     while total(width, duration, fps) > max_pixels and duration > 3:
         duration -= 1
     while total(width, duration, fps) > max_pixels and fps > 6:
@@ -5721,7 +5736,7 @@ def _clamp_slr_gif_params(
         width -= 40
 
     if total(width, duration, fps) > max_pixels and src_w > 0 and src_h > 0:
-        frames = max(1, fps * duration)
+        frames = _slr_gif_frame_count(fps, duration)
         aspect = src_h / src_w
         w_cap = int((max_pixels / (aspect * frames)) ** 0.5)
         width = max(120, min(width, w_cap))
@@ -5783,13 +5798,16 @@ def _slr_preview_gif_bytes(code: str) -> bytes:
             width,
             duration,
             max_pixels=SLR_GIF_MAX_ANIMATED_PIXELS,
+            max_frames=SLR_GIF_MAX_FRAMES,
         )
         est_pixels = _slr_gif_animated_pixels(width, out_h, fps, duration)
+        est_frames = _slr_gif_frame_count(fps, duration)
         if (fps, width, duration) != (req_fps, req_w, req_d):
             print(
-                f"[SLR-GIF] Clamped for GoonBox animated cap ({SLR_GIF_MAX_ANIMATED_PIXELS:,} px): "
+                f"[SLR-GIF] Clamped for GoonBox limits "
+                f"(≤{SLR_GIF_MAX_FRAMES} frames, {SLR_GIF_MAX_ANIMATED_PIXELS:,} px): "
                 f"{req_w}px@{req_fps}fps×{req_d}s → {width}px@{fps}fps×{duration}s "
-                f"(~{est_pixels:,} px, {out_h}px tall)",
+                f"(~{est_frames} frames, ~{est_pixels:,} px, {out_h}px tall)",
                 flush=True,
             )
 
@@ -5847,6 +5865,11 @@ def _slr_preview_gif_bytes(code: str) -> bytes:
             f"GoonBox limit is {SLR_GIF_MAX_ANIMATED_PIXELS:,} (width×height×frames). "
             f"Lower SLR_GIF_WIDTH / SLR_GIF_FPS / SLR_GIF_MAX_DURATION."
         )
+    if gframes > SLR_GIF_MAX_FRAMES:
+        raise RuntimeError(
+            f"GIF has {gframes} frames — GoonBox limit is {SLR_GIF_MAX_FRAMES}. "
+            f"Lower SLR_GIF_FPS / SLR_GIF_MAX_DURATION."
+        )
     if gtotal > 0:
         print(
             f"[SLR-GIF] {gw}×{gh}, {gframes} frames, {len(gif_bytes):,} bytes, "
@@ -5887,6 +5910,41 @@ def _slr_preview_mp4_url(code: str) -> str:
 def _which_ffmpeg() -> str | None:
     path = shutil.which("ffmpeg")
     return path if path else None
+
+
+@app.route("/api/pixhost_upload", methods=["POST"])
+def api_pixhost_upload():
+    """Proxy one image to PiXhost API v2; returns BBCode for the Image Embed field."""
+    if not PIXHOST_ENABLED:
+        return jsonify({"error": "PiXhost upload is disabled (PIXHOST_ENABLED=0)"}), 503
+    import pixhost_upload
+
+    f = request.files.get("file")
+    if not f or not f.filename:
+        return jsonify({"error": "Missing file (multipart field name: file)"}), 400
+    try:
+        data = f.read()
+    except OSError as e:
+        return jsonify({"error": f"Could not read upload: {e}"}), 400
+    if not data:
+        return jsonify({"error": "Empty file"}), 400
+
+    filename = os.path.basename(f.filename) or "upload.bin"
+    content_type = (f.content_type or "application/octet-stream").strip()
+    try:
+        body = pixhost_upload.upload_bytes(data, filename, content_type=content_type)
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 502
+
+    return jsonify(
+        {
+            "bbcode": body.get("bbcode") or "",
+            "direct_url": body.get("direct_url") or "",
+            "show_url": body.get("show_url") or "",
+            "th_url": body.get("th_url") or "",
+            "manage_url": body.get("manage_url") or "",
+        }
+    )
 
 
 @app.route("/api/slr_preview_gif")

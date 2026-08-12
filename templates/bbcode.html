@@ -303,10 +303,27 @@
               type="button"
               class="btn secondary"
               id="goonbox-upload-btn"
-              title="Open GoonBox uploader and append BBCode into the Image Embed field"
+              title="Open GoonBox uploader (account/album) and append BBCode into the Image Embed field"
             >
-              Upload images
+              Upload (Goonbox)
             </button>
+            {% if pixhost_enabled %}
+            <button
+              type="button"
+              class="btn secondary"
+              id="pixhost-upload-btn"
+              title="Upload images via PiXhost (no account; Simpcity whitelist)"
+            >
+              Upload (Pixhost)
+            </button>
+            <input
+              type="file"
+              id="pixhost-file-input"
+              accept="image/jpeg,image/png,image/gif,image/webp,image/avif"
+              multiple
+              hidden
+            >
+            {% endif %}
           </div>
         </div>
 
@@ -363,6 +380,7 @@
       gofileEnabled: {{ gofile_enabled|tojson }},
       filesterEnabled: {{ filester_enabled|tojson }},
       goonboxBaseUrl: {{ goonbox_base_url|tojson }},
+      pixhostEnabled: {{ pixhost_enabled|tojson }},
       stashdbScenesBase: {{ stashdb_scenes_base|tojson }},
     };
     let activeFilename = (PAGE_DATA.filename || "").trim();
@@ -502,6 +520,65 @@
       return String(text || "")
         .replace(/\s/g, "")
         .replace(/\.md\.gif/gi, ".gif");
+    }
+
+    function appendImageBbcode(bbcode) {
+      const bb = String(bbcode || "").trim();
+      if (!bb) return;
+      const el = fields["image-bbcode"];
+      if (!el) return;
+      const current = sanitizeImageBbcodeInput(el.value);
+      const cleaned = sanitizeImageBbcodeInput(bb);
+      if (current && current.includes(cleaned)) return;
+      const merged = current ? current + " " + cleaned : cleaned;
+      el.value = sanitizeImageBbcodeInput(merged);
+      composeBbcode();
+    }
+
+    async function uploadFilesToPixhost(fileList) {
+      const files = Array.from(fileList || []).filter((f) => f && f.size > 0);
+      if (!files.length) return;
+      const btn = document.getElementById("pixhost-upload-btn");
+      const prevLabel = btn ? btn.textContent : "";
+      if (btn) {
+        btn.disabled = true;
+        btn.textContent = "Uploading…";
+      }
+      helperStatusEl.className = "";
+      helperStatusEl.textContent = "";
+      let uploaded = 0;
+      try {
+        for (const file of files) {
+          helperStatusEl.textContent = `PiXhost upload ${uploaded + 1}/${files.length}…`;
+          const fd = new FormData();
+          fd.append("file", file, file.name);
+          const r = await fetch("/api/pixhost_upload", { method: "POST", body: fd });
+          let data = {};
+          try {
+            data = await r.json();
+          } catch (_j) { /* ignore */ }
+          if (!r.ok) {
+            throw new Error((data && data.error) || r.statusText || String(r.status));
+          }
+          appendImageBbcode(data.bbcode);
+          uploaded += 1;
+        }
+        helperStatusEl.className = "ok";
+        helperStatusEl.textContent =
+          uploaded === 1 ? "PiXhost upload complete." : `PiXhost uploads complete (${uploaded}).`;
+      } catch (e) {
+        helperStatusEl.className = "err";
+        const msg = e && e.message ? e.message : String(e);
+        helperStatusEl.textContent =
+          uploaded > 0
+            ? `PiXhost: ${uploaded}/${files.length} uploaded; then failed: ${msg}`
+            : `PiXhost upload failed: ${msg}`;
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.textContent = prevLabel || "Upload (Pixhost)";
+        }
+      }
     }
 
     function addActressRow(name = "", link = "") {
@@ -1474,6 +1551,17 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]`;
       composeBbcode();
     });
 
+    const pixhostUploadBtn = document.getElementById("pixhost-upload-btn");
+    const pixhostFileInput = document.getElementById("pixhost-file-input");
+    if (pixhostUploadBtn && pixhostFileInput) {
+      pixhostUploadBtn.addEventListener("click", () => pixhostFileInput.click());
+      pixhostFileInput.addEventListener("change", () => {
+        const files = pixhostFileInput.files;
+        pixhostFileInput.value = "";
+        if (files && files.length) void uploadFilesToPixhost(files);
+      });
+    }
+
     async function applyResolutionFromUrlOrCache() {
       const dimsFromQuery = parseVideoDimsFromQuery();
       if (dimsFromQuery) {
@@ -1552,19 +1640,6 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]`;
       script.async = false;
       const boot = document.getElementById("goonbox-plugin-bootstrap");
       (boot || document.body).insertAdjacentElement("afterend", script);
-
-      function appendImageBbcode(bbcode) {
-        const bb = String(bbcode || "").trim();
-        if (!bb) return;
-        const el = document.getElementById("image-bbcode");
-        if (!el) return;
-        const current = sanitizeImageBbcodeInput(el.value);
-        const cleaned = sanitizeImageBbcodeInput(bb);
-        if (current && current.includes(cleaned)) return;
-        const merged = current ? current + " " + cleaned : cleaned;
-        el.value = sanitizeImageBbcodeInput(merged);
-        composeBbcode();
-      }
 
       window.addEventListener("imgUploaded", (e) => {
         appendImageBbcode(e.detail?.bbcode);
