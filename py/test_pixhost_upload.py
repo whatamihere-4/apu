@@ -47,6 +47,9 @@ class PixhostUrlTests(unittest.TestCase):
         bb = pixhost_upload.bbcode_from_response(raw)
         self.assertEqual(bb, "[IMG]https://img1.pixhost.cc/images/1/2_anim.gif[/IMG]")
 
+    def test_content_type_defaults_nsfw(self):
+        self.assertEqual(pixhost_upload._pixhost_content_type(), "1")
+
 
 if __name__ == "__main__":
     unittest.main()

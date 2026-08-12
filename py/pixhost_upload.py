@@ -1,7 +1,9 @@
 """PiXhost image upload client (https://pixhost.cc/api — API v2, no auth).
 
 Uploads via ``POST {PIXHOST_API_URL}/images`` and returns ``[IMG]direct[/IMG]``
-using the direct ``/images/`` URL (not the show page or thumb).
+using the direct ``imgN.…/images/…`` URL derived from ``th_url``.
+
+``content_type`` form field: ``0`` = SFW, ``1`` = NSFW (default for this app).
 """
 from __future__ import annotations
 
@@ -30,10 +32,10 @@ _THUMB_URL_RE = re.compile(
 )
 
 
-_THUMB_URL_RE = re.compile(
-    r"^https?://t(?P<num>\d+)\.(?P<host>pixhost\.(?:cc|to)|pixho\.st)/thumbs/(?P<path>.+)$",
-    re.I,
-)
+def _pixhost_content_type() -> str:
+    """PiXhost ``content_type`` form value: ``1`` = NSFW (default), ``0`` = SFW."""
+    v = (PIXHOST_CONTENT_TYPE or "1").strip()
+    return "0" if v == "0" else "1"
 
 
 def direct_url_from_thumb_url(thumb_url: str) -> str:
@@ -93,33 +95,7 @@ def bbcode_from_response(raw: dict) -> str:
     return f"[IMG]{direct}[/IMG]"
 
 
-def upload_bytes(
-    data: bytes,
-    filename: str,
-    *,
-    content_type: str = "application/octet-stream",
-) -> dict:
-    """Upload in-memory file bytes. Returns parsed JSON + ``bbcode`` key."""
-    if not data:
-        raise RuntimeError("empty upload payload")
-
-    form: dict[str, str] = {
-        "content_type": PIXHOST_CONTENT_TYPE or "1",
-    }
-    if PIXHOST_MAX_TH_SIZE:
-        form["max_th_size"] = PIXHOST_MAX_TH_SIZE
-    if PIXHOST_INCLUDE_MANAGE_URL:
-        form["include_manage_url"] = "1"
-
-    files = {"img": (filename, data, content_type)}
-    r = requests.post(
-        f"{PIXHOST_API_URL}/images",
-        files=files,
-        data=form,
-        headers={"Accept": "application/json"},
-        timeout=180,
-    )
-
+def _raise_pixhost_http_error(r: requests.Response, *, context: str) -> None:
     if r.status_code == 413:
         raise RuntimeError("File exceeds PiXhost upload size limit (10 MB)")
     if r.status_code == 414:
@@ -135,10 +111,39 @@ def upload_bytes(
                 ).strip()
         except ValueError:
             detail = (r.text or "").strip()[:300]
-        msg = f"PiXhost upload HTTP {r.status_code}"
+        msg = f"PiXhost {context} HTTP {r.status_code}"
         if detail:
             msg = f"{msg}: {detail}"
         raise RuntimeError(msg)
+
+
+def upload_bytes(
+    data: bytes,
+    filename: str,
+    *,
+    content_type: str = "application/octet-stream",
+) -> dict:
+    """Upload in-memory file bytes. Returns parsed JSON + ``bbcode`` key."""
+    if not data:
+        raise RuntimeError("empty upload payload")
+
+    form: dict[str, str] = {
+        "content_type": _pixhost_content_type(),
+    }
+    if PIXHOST_MAX_TH_SIZE:
+        form["max_th_size"] = PIXHOST_MAX_TH_SIZE
+    if PIXHOST_INCLUDE_MANAGE_URL:
+        form["include_manage_url"] = "1"
+
+    files = {"img": (filename, data, content_type)}
+    r = requests.post(
+        f"{PIXHOST_API_URL}/images",
+        files=files,
+        data=form,
+        headers={"Accept": "application/json"},
+        timeout=180,
+    )
+    _raise_pixhost_http_error(r, context="upload")
 
     body = r.json()
     if not isinstance(body, dict):

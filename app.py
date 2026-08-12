@@ -5914,35 +5914,56 @@ def _which_ffmpeg() -> str | None:
 
 @app.route("/api/pixhost_upload", methods=["POST"])
 def api_pixhost_upload():
-    """Proxy one image to PiXhost API v2; returns BBCode for the Image Embed field."""
+    """Proxy image(s) to PiXhost API v2 as standalone uploads; returns BBCode."""
     if not PIXHOST_ENABLED:
         return jsonify({"error": "PiXhost upload is disabled (PIXHOST_ENABLED=0)"}), 503
     import pixhost_upload
 
-    f = request.files.get("file")
-    if not f or not f.filename:
-        return jsonify({"error": "Missing file (multipart field name: file)"}), 400
-    try:
-        data = f.read()
-    except OSError as e:
-        return jsonify({"error": f"Could not read upload: {e}"}), 400
-    if not data:
-        return jsonify({"error": "Empty file"}), 400
+    raw_files = request.files.getlist("file")
+    if not raw_files:
+        one = request.files.get("file")
+        raw_files = [one] if one and one.filename else []
 
-    filename = os.path.basename(f.filename) or "upload.bin"
-    content_type = (f.content_type or "application/octet-stream").strip()
+    parsed: list[tuple[str, bytes, str]] = []
+    for f in raw_files:
+        if not f or not f.filename:
+            continue
+        try:
+            data = f.read()
+        except OSError as e:
+            return jsonify({"error": f"Could not read upload: {e}"}), 400
+        if not data:
+            continue
+        filename = os.path.basename(f.filename) or "upload.bin"
+        content_type = (f.content_type or "application/octet-stream").strip()
+        parsed.append((filename, data, content_type))
+
+    if not parsed:
+        return jsonify({"error": "Missing file (multipart field name: file)"}), 400
+
+    uploads: list[dict] = []
     try:
-        body = pixhost_upload.upload_bytes(data, filename, content_type=content_type)
+        for filename, data, content_type in parsed:
+            body = pixhost_upload.upload_bytes(data, filename, content_type=content_type)
+            uploads.append(
+                {
+                    "bbcode": body.get("bbcode") or "",
+                    "direct_url": body.get("direct_url") or "",
+                    "show_url": body.get("show_url") or "",
+                    "th_url": body.get("th_url") or "",
+                    "manage_url": body.get("manage_url") or "",
+                }
+            )
     except RuntimeError as e:
         return jsonify({"error": str(e)}), 502
 
+    if len(uploads) == 1:
+        return jsonify(uploads[0])
+
     return jsonify(
         {
-            "bbcode": body.get("bbcode") or "",
-            "direct_url": body.get("direct_url") or "",
-            "show_url": body.get("show_url") or "",
-            "th_url": body.get("th_url") or "",
-            "manage_url": body.get("manage_url") or "",
+            "bbcode": " ".join(u["bbcode"] for u in uploads if u.get("bbcode")),
+            "uploads": uploads,
         }
     )
 
