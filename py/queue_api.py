@@ -75,7 +75,11 @@ def register_queue_routes(app, *, jobs, hashes_dir, downloads_dir, start_link_jo
         data = request.get_json(silent=True) or {}
         items = data.get("items")
         if not isinstance(items, list):
-            return jsonify({"error": "items array required"}), 400
+            pending = data.get("pending")
+            if isinstance(pending, list):
+                items = pending
+            else:
+                return jsonify({"error": "items array required (or pending from export)"}), 400
         job_ids = []
         for item in items:
             if not isinstance(item, dict):

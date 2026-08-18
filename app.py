@@ -1054,6 +1054,15 @@ def _gofile_root_id_optional() -> str | None:
 #           "checked_at": "ISO-8601",
 #           "contributed": ["OSHASH:<hash>", ...]        # submitFingerprint successes (idempotency)
 #       }
+#       "upload": {                                      # set after successful upload
+#           "gofile_url", "filester_url", "was_split",
+#           "filester_folder_url" (split), "filester_file_url" (single file),
+#           "recorded_at"
+#       }
+#       "split": {                                       # split metadata from upload
+#           "was_split", "part_count", "original_basename", "split_mode",
+#           "folder_url" (Filester split folder), "recorded_at"
+#       }
 #       "bbcode": {                                      # last manual BBCode row saved on /bbcode copy
 #           "studio", "gallery_link", "title", "upload_date", "resolution",
 #           "stashdb_url", "saved_at"
@@ -6348,15 +6357,22 @@ def _finalize_upload(
     parts = [u for u in (gofile_url, filester_url) if u]
     jobs[job_id]["download_page"] = " | ".join(parts)
 
+    was_split = bool(split_info and int(split_info.get("part_count") or 0) > 1)
+
     source_fn = (jobs[job_id].get("source_filename") or "").strip()
     if source_fn and (gofile_url or filester_url):
         upload_meta = {
             "recorded_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "was_split": was_split,
         }
         if gofile_url:
             upload_meta["gofile_url"] = gofile_url
         if filester_url:
             upload_meta["filester_url"] = filester_url
+            if was_split:
+                upload_meta["filester_folder_url"] = filester_url
+            else:
+                upload_meta["filester_file_url"] = filester_url
         if filester_skip_reason:
             upload_meta["filester_skipped_reason"] = filester_skip_reason
         _scenes_set(source_fn, upload=upload_meta)
@@ -6364,15 +6380,25 @@ def _finalize_upload(
     if split_info:
         jobs[job_id]["split"] = split_info
         if source_fn:
-            _scenes_set(
-                source_fn,
-                split={
-                    "part_count": split_info["part_count"],
-                    "original_basename": split_info["original_basename"],
-                    "split_mode": split_info.get("split_mode") or FILESTER_SPLIT_MODE,
-                    "recorded_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
-                },
-            )
+            split_entry = {
+                "was_split": was_split,
+                "part_count": split_info["part_count"],
+                "original_basename": split_info["original_basename"],
+                "split_mode": split_info.get("split_mode") or FILESTER_SPLIT_MODE,
+                "recorded_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            }
+            if was_split and filester_url:
+                split_entry["folder_url"] = filester_url
+            _scenes_set(source_fn, split=split_entry)
+    elif source_fn and (gofile_url or filester_url):
+        _scenes_set(
+            source_fn,
+            split={
+                "was_split": False,
+                "part_count": 1,
+                "recorded_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            },
+        )
 
     helper = jobs[job_id].get("stashdb_helper_url") or ""
     if isinstance(helper, str) and helper.startswith("/bbcode"):

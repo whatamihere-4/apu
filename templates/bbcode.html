@@ -494,10 +494,40 @@
       }
     }
 
-    function hasPrimaryGalleryFilled() {
-      if (isGofileOn()) return !!fields["gallery-link"].value.trim();
-      if (isFilesterOn()) return !!getFilesterLinkValue();
-      return false;
+    function isSceneSplit() {
+      return splitState.parts > 1;
+    }
+
+    /** Scene download link(s) from upload cache — never studio folder URLs. */
+    function applySceneUploadLinks(upload, split) {
+      if (!upload || typeof upload !== "object") return;
+      const splitMeta = split && typeof split === "object" ? split : {};
+      const wasSplit =
+        upload.was_split === true ||
+        splitMeta.was_split === true ||
+        (parseInt(splitMeta.part_count, 10) || 0) > 1;
+      if (wasSplit) {
+        applySplitState({
+          parts: parseInt(splitMeta.part_count, 10) || splitState.parts || 2,
+          basename: splitMeta.original_basename || activeFilename || "",
+          mode: splitMeta.split_mode || splitState.mode || "",
+        });
+      } else if (upload.was_split === false || splitMeta.was_split === false) {
+        splitState = { parts: 0, basename: "", mode: "" };
+      }
+      const filesterUrl = (
+        (wasSplit && (upload.filester_folder_url || upload.filester_url)) ||
+        upload.filester_file_url ||
+        upload.filester_url ||
+        ""
+      ).trim();
+      const gofileUrl = (upload.gofile_url || "").trim();
+      if (gofileUrl && isGofileOn()) {
+        fields["gallery-link"].value = gofileUrl;
+      }
+      if (filesterUrl && isFilesterOn()) {
+        setFilesterLinkValue(filesterUrl);
+      }
     }
 
     function updateUploadProviderFields() {
@@ -953,7 +983,7 @@
 [/TR]
 `
         : "";
-      const filesterMergeFooter = filesterOn && PAGE_DATA.filesterMergePartsGuideUrl
+      const filesterMergeFooter = filesterOn && isSceneSplit() && PAGE_DATA.filesterMergePartsGuideUrl
         ? `[SIZE=${PAGE_DATA.filesterMergePartsGuideSize || 3}]Click [URL='${PAGE_DATA.filesterMergePartsGuideUrl}']here[/URL] to learn how to merge split video parts[/SIZE]`
         : "";
       const output = `[HEADING=1]${actressPart} - ${title}[/HEADING]
@@ -1258,10 +1288,7 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]${filesterMergeFooter}`;
         fields["title"].value = scene.title || "";
         fields["upload-date"].value = prettyDate(scene.release_date || "");
         fields["studio"].value = studioName;
-        await applyStudioResolution(studioName, {
-          network: networkName,
-          fillGallery: !hasPrimaryGalleryFilled(),
-        });
+        await applyStudioResolution(studioName, { network: networkName });
 
         const metaBits = [];
         metaBits.push(`<a href="${escAttr(sceneUrl)}" target="_blank" rel="noopener">${escHtml(scene.title || "(no title)")}</a>`);
@@ -1328,17 +1355,6 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]${filesterMergeFooter}`;
         studioFolderUrl = (data.studio_folder_url || data.gallery_link || "").trim();
         studioFolderFilesterUrl = (data.filester_gallery_link || "").trim();
         if (data.thread_url) threadUrl = data.thread_url;
-        const fillGallery = opts.fillGallery !== false;
-        if (
-          fillGallery &&
-          data.filester_gallery_link &&
-          !getFilesterLinkValue()
-        ) {
-          setFilesterLinkValue(data.filester_gallery_link);
-        }
-        if (fillGallery && isGofileOn() && data.gallery_link && !fields["gallery-link"].value.trim()) {
-          fields["gallery-link"].value = data.gallery_link;
-        }
         composeBbcode();
         return data;
       } catch (_err) {
@@ -1350,7 +1366,7 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]${filesterMergeFooter}`;
       clearTimeout(studioResolveTimer);
       studioResolveTimer = setTimeout(() => {
         const s = fields["studio"].value.trim();
-        if (s) void applyStudioResolution(s, { fillGallery: false });
+        if (s) void applyStudioResolution(s);
         else {
           studioFolderUrl = "";
           studioFolderFilesterUrl = "";
@@ -1377,30 +1393,32 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]${filesterMergeFooter}`;
         }
         if (bb.studio && !fields["studio"].value.trim()) {
           fields["studio"].value = bb.studio;
-          await applyStudioResolution(bb.studio, { fillGallery: false });
+          await applyStudioResolution(bb.studio);
         }
-        if (bb.gallery_link) {
+        const upload = (data.entry && data.entry.upload) || {};
+        const split = (data.entry && data.entry.split) || {};
+        if (upload.gofile_url || upload.filester_url) {
+          applySceneUploadLinks(upload, split);
+        } else if (bb.gallery_link) {
           if (isGofileOn() && !fields["gallery-link"].value.trim()) {
             fields["gallery-link"].value = bb.gallery_link;
           } else if (isFilesterOn() && !isGofileOn() && !getFilesterLinkValue()) {
             setFilesterLinkValue(bb.gallery_link);
           }
         }
-        const upload = (data.entry && data.entry.upload) || {};
-        if (upload.gofile_url && isGofileOn() && !fields["gallery-link"].value.trim()) {
-          fields["gallery-link"].value = upload.gofile_url;
-        }
-        if (upload.filester_url) setFilesterLinkValue(upload.filester_url);
         if (bb.stashdb_url && !stashdbLinkEl.value.trim()) {
           stashdbLinkEl.value = bb.stashdb_url;
         }
-        const split = (data.entry && data.entry.split) || {};
-        if (split.part_count > 1) {
-          applySplitState({
-            parts: split.part_count,
-            basename: split.original_basename || fn,
-            mode: split.split_mode || "",
-          });
+        if (!upload.gofile_url && !upload.filester_url) {
+          if (split.was_split || split.part_count > 1) {
+            applySplitState({
+              parts: split.part_count,
+              basename: split.original_basename || fn,
+              mode: split.split_mode || "",
+            });
+            const folderUrl = (split.folder_url || "").trim();
+            if (folderUrl && isFilesterOn()) setFilesterLinkValue(folderUrl);
+          }
         }
       } catch (_err) { /* optional */ }
     }
@@ -1470,9 +1488,7 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]${filesterMergeFooter}`;
 
       const studioNow = fields["studio"].value.trim();
       if (studioNow) {
-        await applyStudioResolution(studioNow, {
-          fillGallery: !hasPrimaryGalleryFilled(),
-        });
+        await applyStudioResolution(studioNow);
       }
     }
 
@@ -1577,10 +1593,8 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]${filesterMergeFooter}`;
         fields["upload-date"].value = data.upload_date || "";
         fields["studio"].value = data.studio || "";
         if (data.thread_url) threadUrl = data.thread_url;
-        if (data.filester_gallery_link) setFilesterLinkValue(data.filester_gallery_link);
-        if (isGofileOn() && data.gallery_link && !fields["gallery-link"].value.trim()) {
-          fields["gallery-link"].value = data.gallery_link;
-        }
+        studioFolderUrl = (data.studio_folder_url || data.gallery_link || "").trim();
+        studioFolderFilesterUrl = (data.filester_gallery_link || "").trim();
         if (data.image_bbcode) {
           fields["image-bbcode"].value = sanitizeImageBbcodeInput(data.image_bbcode);
         }
@@ -1594,15 +1608,7 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]${filesterMergeFooter}`;
         } else if (data.studio) {
           await applyStudioResolution(data.studio, {
             network: data.network_studio || "",
-            fillGallery: !hasPrimaryGalleryFilled(),
           });
-        }
-        if (
-          isGofileOn() &&
-          !fields["gallery-link"].value.trim() &&
-          data.gallery_link
-        ) {
-          fields["gallery-link"].value = data.gallery_link;
         }
         try {
           await persistStashdbLinkFromAutofill(data);

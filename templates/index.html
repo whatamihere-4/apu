@@ -333,6 +333,8 @@
       <span style="font-size:0.85rem; color:var(--muted);">Queue tools</span>
       <button class="btn-sm" type="button" id="export-queue-btn">Export pending queue</button>
       <button class="btn-sm" type="button" id="copy-queue-btn">Copy as JSON</button>
+      <button class="btn-sm" type="button" id="import-queue-btn">Import queue</button>
+      <input type="file" id="import-queue-file" accept="application/json,.json,.txt,text/plain" hidden>
     </div>
   </div>
 
@@ -1243,6 +1245,55 @@
         alert('Queue export failed: ' + e.message);
       }
     }
+
+    function parseQueueImportPayload(raw) {
+      const text = String(raw || '').trim();
+      if (!text) throw new Error('Empty file');
+      if (text.startsWith('{') || text.startsWith('[')) {
+        const data = JSON.parse(text);
+        if (Array.isArray(data)) return { items: data };
+        if (Array.isArray(data.items)) return data;
+        if (Array.isArray(data.pending)) return data;
+        throw new Error('JSON must contain items or pending array');
+      }
+      const items = [];
+      for (const line of text.split(/\r?\n/)) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#')) continue;
+        const parts = trimmed.split('\t');
+        if (parts.length < 2) continue;
+        const kind = parts[0].trim();
+        const target = parts[1].trim();
+        const folderId = (parts[2] || '').trim();
+        if (kind === 'link') items.push({ type: 'link', url: target, folder_id: folderId });
+        else if (kind === 'path') items.push({ type: 'path', path: target, folder_id: folderId });
+      }
+      if (!items.length) throw new Error('No queue rows found in file');
+      return { items };
+    }
+
+    async function importQueueFromFile(file) {
+      const text = await file.text();
+      const payload = parseQueueImportPayload(text);
+      const data = await api('/api/queue/import', payload);
+      alert(`Imported ${data.count || 0} job(s) into the queue.`);
+      await refreshJobs();
+      scheduleJobsRefresh(120);
+    }
+
+    document.getElementById('import-queue-btn').addEventListener('click', () => {
+      document.getElementById('import-queue-file').click();
+    });
+    document.getElementById('import-queue-file').addEventListener('change', async (e) => {
+      const file = e.target.files && e.target.files[0];
+      e.target.value = '';
+      if (!file) return;
+      try {
+        await importQueueFromFile(file);
+      } catch (err) {
+        alert('Queue import failed: ' + (err.message || err));
+      }
+    });
 
     function updateFilesterSyncHint() {
       const hint = document.getElementById('filester-sync-hint');
