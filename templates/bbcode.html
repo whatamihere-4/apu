@@ -299,34 +299,33 @@
           <label for="image-bbcode">Image Embed BBCode (cover + thumbs + GIF)</label>
           <textarea id="image-bbcode" placeholder="[IMG]cover[/IMG][IMG]thumbs[/IMG][IMG]gif[/IMG]"></textarea>
           <div class="image-tools" style="margin-top:0.5rem;">
-            {% if gif_host == 'goonbox' %}
             <button
               type="button"
               class="btn secondary"
               id="goonbox-upload-btn"
-              title="Open GoonBox uploader (account/album) and append BBCode into the Image Embed field"
+              title="Open GoonBox uploader (account/album) for cover and thumbs"
             >
               Upload (Goonbox)
             </button>
-            {% elif gif_host == 'gifyu' %}
+            {% if gif_host == 'gifyu' %}
             <button
               type="button"
               class="btn secondary"
               id="gifyu-upload-btn"
               data-chevereto-pup-trigger
               data-target="#image-bbcode"
-              title="Open Gifyu uploader (log in for albums; up to 100 MB GIFs) and append BBCode"
+              title="Upload large GIFs via Gifyu (log in for albums; up to ~25 MB)"
             >
-              Upload (Gifyu)
+              Upload GIF (Gifyu)
             </button>
             {% elif gif_host == 'pixhost' %}
             <button
               type="button"
               class="btn secondary"
               id="pixhost-upload-btn"
-              title="Upload images via PiXhost (no account; Simpcity whitelist)"
+              title="Upload GIF via PiXhost (no account; 10 MB cap)"
             >
-              Upload (Pixhost)
+              Upload GIF (Pixhost)
             </button>
             <input
               type="file"
@@ -1641,7 +1640,6 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]`;
       composeBbcode();
     })();
   </script>
-  {% if gif_host == 'goonbox' %}
   <script id="goonbox-plugin-bootstrap">
     (function () {
       const GOONBOX_BASE = {{ goonbox_base_url|tojson }};
@@ -1682,7 +1680,7 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]`;
       });
     })();
   </script>
-  {% elif gif_host == 'gifyu' %}
+  {% if gif_host == 'gifyu' %}
   <script id="gifyu-pup-bootstrap">
     (function () {
       const GIFYU_BASE = {{ gifyu_base_url|tojson }};
