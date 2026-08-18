@@ -299,6 +299,7 @@
           <label for="image-bbcode">Image Embed BBCode (cover + thumbs + GIF)</label>
           <textarea id="image-bbcode" placeholder="[IMG]cover[/IMG][IMG]thumbs[/IMG][IMG]gif[/IMG]"></textarea>
           <div class="image-tools" style="margin-top:0.5rem;">
+            {% if gif_host == 'goonbox' %}
             <button
               type="button"
               class="btn secondary"
@@ -307,7 +308,18 @@
             >
               Upload (Goonbox)
             </button>
-            {% if pixhost_enabled %}
+            {% elif gif_host == 'gifyu' %}
+            <button
+              type="button"
+              class="btn secondary"
+              id="gifyu-upload-btn"
+              data-chevereto-pup-trigger
+              data-target="#image-bbcode"
+              title="Open Gifyu uploader (log in for albums; up to 100 MB GIFs) and append BBCode"
+            >
+              Upload (Gifyu)
+            </button>
+            {% elif gif_host == 'pixhost' %}
             <button
               type="button"
               class="btn secondary"
@@ -380,6 +392,8 @@
       gofileEnabled: {{ gofile_enabled|tojson }},
       filesterEnabled: {{ filester_enabled|tojson }},
       goonboxBaseUrl: {{ goonbox_base_url|tojson }},
+      gifyuBaseUrl: {{ gifyu_base_url|tojson }},
+      gifHost: {{ gif_host|tojson }},
       pixhostEnabled: {{ pixhost_enabled|tojson }},
       stashdbScenesBase: {{ stashdb_scenes_base|tojson }},
     };
@@ -1627,6 +1641,7 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]`;
       composeBbcode();
     })();
   </script>
+  {% if gif_host == 'goonbox' %}
   <script id="goonbox-plugin-bootstrap">
     (function () {
       const GOONBOX_BASE = {{ goonbox_base_url|tojson }};
@@ -1667,5 +1682,41 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]`;
       });
     })();
   </script>
+  {% elif gif_host == 'gifyu' %}
+  <script id="gifyu-pup-bootstrap">
+    (function () {
+      const GIFYU_BASE = {{ gifyu_base_url|tojson }};
+      const base = GIFYU_BASE.replace(/\/+$/, "");
+      const script = document.createElement("script");
+      script.src = base + "/sdk/pup.js";
+      script.setAttribute("data-url", base + "/upload");
+      script.setAttribute("data-mode", "manual");
+      script.setAttribute("data-auto-insert", "bbcode-embed");
+      script.async = true;
+      const boot = document.getElementById("gifyu-pup-bootstrap");
+      (boot || document.body).insertAdjacentElement("afterend", script);
+
+      // PUP inserts into #image-bbcode; re-sanitize when the upload popup closes.
+      let gifyuPopupPending = false;
+      document.addEventListener("DOMContentLoaded", () => {
+        const btn = document.getElementById("gifyu-upload-btn");
+        if (btn) {
+          btn.addEventListener("click", () => {
+            gifyuPopupPending = true;
+          });
+        }
+      });
+      window.addEventListener("focus", () => {
+        if (!gifyuPopupPending) return;
+        gifyuPopupPending = false;
+        const el = document.getElementById("image-bbcode");
+        if (!el || typeof sanitizeImageBbcodeInput !== "function") return;
+        const cleaned = sanitizeImageBbcodeInput(el.value);
+        if (cleaned !== el.value) el.value = cleaned;
+        if (typeof composeBbcode === "function") composeBbcode();
+      });
+    })();
+  </script>
+  {% endif %}
 </body>
 </html>

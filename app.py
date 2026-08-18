@@ -48,6 +48,7 @@ from filester_upload import (
     organize_split_parts_into_folder,
 )
 from oshash_remote import fetch_oshash_from_url
+from gif_host import gif_encode_limits, resolved_gif_host
 from queue_persist import track_add, track_remove
 from queue_api import register_queue_routes
 import server_scan
@@ -209,16 +210,10 @@ FILESTER_FOLDER_SYNC_INCLUDE_CHILDREN = _env_yes(
 
 
 GOONBOX_BASE_URL = (os.environ.get("GOONBOX_BASE_URL") or "https://goonbox.cr").rstrip("/")
-PIXHOST_ENABLED = _env_yes("PIXHOST_ENABLED", default="1")
+GIFYU_BASE_URL = (os.environ.get("GIFYU_BASE_URL") or "https://gifyu.com").rstrip("/")
 PIXHOST_API_URL = (os.environ.get("PIXHOST_API_URL") or "https://api.pixhost.cc").rstrip("/")
-SLR_GIF_FPS = _env_int("SLR_GIF_FPS", 12)
-SLR_GIF_WIDTH = _env_int("SLR_GIF_WIDTH", 480)
-SLR_GIF_MAX_DURATION = _env_int("SLR_GIF_MAX_DURATION", 15)
-SLR_GIF_MAX_BYTES = _env_int("SLR_GIF_MAX_BYTES", 26_214_400)
-# GoonBox animated cap (width × height × frames); matches GET /api/upload/config.
-SLR_GIF_MAX_ANIMATED_PIXELS = _env_int("SLR_GIF_MAX_ANIMATED_PIXELS", 50_000_000)
-# Undocumented GoonBox GIF frame cap (default 120).
-SLR_GIF_MAX_FRAMES = _env_int("SLR_GIF_MAX_FRAMES", 120)
+GIF_HOST = resolved_gif_host()
+GIF_ENCODE_LIMITS = gif_encode_limits(GIF_HOST)
 JOB_LINKS_FILENAME_ONLY = _env_yes("JOB_LINKS_FILENAME_ONLY", default="0")
 HASHER_ALGORITHMS = ("OSHASH", "MD5", "PHASH")
 
@@ -1770,7 +1765,9 @@ def bbcode_page():
         filester_split_mode=FILESTER_SPLIT_MODE,
         stashdb_scenes_base=STASHDB_SCENES_BASE,
         goonbox_base_url=GOONBOX_BASE_URL,
-        pixhost_enabled=PIXHOST_ENABLED,
+        gifyu_base_url=GIFYU_BASE_URL,
+        gif_host=GIF_HOST,
+        pixhost_enabled=(GIF_HOST == "pixhost"),
     )
 
 
@@ -5708,11 +5705,10 @@ def _clamp_slr_gif_params(
     max_pixels: int,
     max_frames: int,
 ) -> tuple[int, int, int, int]:
-    """Fit SLR GIF encode params under GoonBox frame and animated-pixel caps."""
+    """Fit SLR GIF encode params under host frame and animated-pixel caps (0 = no cap)."""
     fps = max(1, min(fps, 60))
     width = max(120, min(width, 1920))
     duration = max(1, min(duration, 60))
-    max_frames = max(1, max_frames)
 
     if src_w <= 0 or src_h <= 0:
         out_h = width
@@ -5723,23 +5719,25 @@ def _clamp_slr_gif_params(
         h = max(1, int(round(w * src_h / src_w))) if src_w > 0 and src_h > 0 else w
         return _slr_gif_animated_pixels(w, h, f, d)
 
-    while _slr_gif_frame_count(fps, duration) > max_frames and duration > 1:
-        duration -= 1
-    while _slr_gif_frame_count(fps, duration) > max_frames and fps > 1:
-        fps -= 1
+    if max_frames > 0:
+        while _slr_gif_frame_count(fps, duration) > max_frames and duration > 1:
+            duration -= 1
+        while _slr_gif_frame_count(fps, duration) > max_frames and fps > 1:
+            fps -= 1
 
-    while total(width, duration, fps) > max_pixels and duration > 3:
-        duration -= 1
-    while total(width, duration, fps) > max_pixels and fps > 6:
-        fps -= 1
-    while total(width, duration, fps) > max_pixels and width > 240:
-        width -= 40
+    if max_pixels > 0:
+        while total(width, duration, fps) > max_pixels and duration > 3:
+            duration -= 1
+        while total(width, duration, fps) > max_pixels and fps > 6:
+            fps -= 1
+        while total(width, duration, fps) > max_pixels and width > 240:
+            width -= 40
 
-    if total(width, duration, fps) > max_pixels and src_w > 0 and src_h > 0:
-        frames = _slr_gif_frame_count(fps, duration)
-        aspect = src_h / src_w
-        w_cap = int((max_pixels / (aspect * frames)) ** 0.5)
-        width = max(120, min(width, w_cap))
+        if total(width, duration, fps) > max_pixels and src_w > 0 and src_h > 0:
+            frames = _slr_gif_frame_count(fps, duration)
+            aspect = src_h / src_w
+            w_cap = int((max_pixels / (aspect * frames)) ** 0.5)
+            width = max(120, min(width, w_cap))
 
     out_h = max(1, int(round(width * src_h / src_w))) if src_w > 0 and src_h > 0 else width
     return fps, width, duration, out_h
@@ -5773,9 +5771,10 @@ def _slr_preview_gif_bytes(code: str) -> bytes:
     if len(mp4_data) < 256:
         raise RuntimeError("Preview download was empty or too small")
 
-    fps = max(1, min(SLR_GIF_FPS, 60))
-    width = max(120, min(SLR_GIF_WIDTH, 1920))
-    duration = max(1, min(SLR_GIF_MAX_DURATION, 60))
+    limits = GIF_ENCODE_LIMITS
+    fps = max(1, min(limits.fps, 60))
+    width = max(120, min(limits.width, 1920))
+    duration = max(1, min(limits.max_duration, 60))
 
     tmp_mp4 = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
     tmp_gif = tempfile.NamedTemporaryFile(suffix=".gif", delete=False)
@@ -5797,15 +5796,20 @@ def _slr_preview_gif_bytes(code: str) -> bytes:
             fps,
             width,
             duration,
-            max_pixels=SLR_GIF_MAX_ANIMATED_PIXELS,
-            max_frames=SLR_GIF_MAX_FRAMES,
+            max_pixels=limits.max_animated_pixels,
+            max_frames=limits.max_frames,
         )
         est_pixels = _slr_gif_animated_pixels(width, out_h, fps, duration)
         est_frames = _slr_gif_frame_count(fps, duration)
         if (fps, width, duration) != (req_fps, req_w, req_d):
+            cap_bits = []
+            if limits.max_frames > 0:
+                cap_bits.append(f"≤{limits.max_frames} frames")
+            if limits.max_animated_pixels > 0:
+                cap_bits.append(f"≤{limits.max_animated_pixels:,} px")
+            cap_desc = ", ".join(cap_bits) if cap_bits else "host limits"
             print(
-                f"[SLR-GIF] Clamped for GoonBox limits "
-                f"(≤{SLR_GIF_MAX_FRAMES} frames, {SLR_GIF_MAX_ANIMATED_PIXELS:,} px): "
+                f"[SLR-GIF] Clamped for {limits.label} ({cap_desc}): "
                 f"{req_w}px@{req_fps}fps×{req_d}s → {width}px@{fps}fps×{duration}s "
                 f"(~{est_frames} frames, ~{est_pixels:,} px, {out_h}px tall)",
                 flush=True,
@@ -5853,22 +5857,24 @@ def _slr_preview_gif_bytes(code: str) -> bytes:
 
     if not gif_bytes or len(gif_bytes) < 32:
         raise RuntimeError("ffmpeg produced an empty GIF")
-    if len(gif_bytes) > SLR_GIF_MAX_BYTES:
+    if limits.max_bytes > 0 and len(gif_bytes) > limits.max_bytes:
         raise RuntimeError(
-            f"GIF is {len(gif_bytes):,} bytes (limit {SLR_GIF_MAX_BYTES:,}). "
-            f"Lower SLR_GIF_WIDTH / SLR_GIF_FPS / SLR_GIF_MAX_DURATION."
+            f"GIF is {len(gif_bytes):,} bytes (limit {limits.max_bytes:,}). "
+            f"Lower {limits.env_prefix}_GIF_WIDTH / {limits.env_prefix}_GIF_FPS / "
+            f"{limits.env_prefix}_GIF_MAX_DURATION."
         )
 
-    if gtotal > SLR_GIF_MAX_ANIMATED_PIXELS:
+    if limits.max_animated_pixels > 0 and gtotal > limits.max_animated_pixels:
         raise RuntimeError(
             f"GIF is {gtotal:,} animated pixels ({gw}×{gh}×{gframes} frames) — "
-            f"GoonBox limit is {SLR_GIF_MAX_ANIMATED_PIXELS:,} (width×height×frames). "
-            f"Lower SLR_GIF_WIDTH / SLR_GIF_FPS / SLR_GIF_MAX_DURATION."
+            f"{limits.label} limit is {limits.max_animated_pixels:,} (width×height×frames). "
+            f"Lower {limits.env_prefix}_GIF_WIDTH / {limits.env_prefix}_GIF_FPS / "
+            f"{limits.env_prefix}_GIF_MAX_DURATION."
         )
-    if gframes > SLR_GIF_MAX_FRAMES:
+    if limits.max_frames > 0 and gframes > limits.max_frames:
         raise RuntimeError(
-            f"GIF has {gframes} frames — GoonBox limit is {SLR_GIF_MAX_FRAMES}. "
-            f"Lower SLR_GIF_FPS / SLR_GIF_MAX_DURATION."
+            f"GIF has {gframes} frames — {limits.label} limit is {limits.max_frames}. "
+            f"Lower {limits.env_prefix}_GIF_FPS / {limits.env_prefix}_GIF_MAX_DURATION."
         )
     if gtotal > 0:
         print(
@@ -5915,8 +5921,8 @@ def _which_ffmpeg() -> str | None:
 @app.route("/api/pixhost_upload", methods=["POST"])
 def api_pixhost_upload():
     """Proxy image(s) to PiXhost API v2 as standalone uploads; returns BBCode."""
-    if not PIXHOST_ENABLED:
-        return jsonify({"error": "PiXhost upload is disabled (PIXHOST_ENABLED=0)"}), 503
+    if GIF_HOST != "pixhost":
+        return jsonify({"error": f"PiXhost upload is disabled (GIF_HOST={GIF_HOST})"}), 503
     import pixhost_upload
 
     raw_files = request.files.getlist("file")
