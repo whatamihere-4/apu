@@ -209,6 +209,12 @@ FILESTER_FOLDER_SYNC_INCLUDE_CHILDREN = _env_yes(
 )
 
 
+FILESTER_MERGE_PARTS_GUIDE_URL = (
+    os.environ.get("FILESTER_MERGE_PARTS_GUIDE_URL")
+    or "https://filester.me/f/009635c93a89316f"
+).strip()
+FILESTER_MERGE_PARTS_GUIDE_SIZE = max(1, min(_env_int("FILESTER_MERGE_PARTS_GUIDE_SIZE", 3), 7))
+
 GOONBOX_BASE_URL = (os.environ.get("GOONBOX_BASE_URL") or "https://goonbox.cr").rstrip("/")
 GIFYU_BASE_URL = (os.environ.get("GIFYU_BASE_URL") or "https://gifyu.com").rstrip("/")
 PIXHOST_API_URL = (os.environ.get("PIXHOST_API_URL") or "https://api.pixhost.cc").rstrip("/")
@@ -1763,6 +1769,8 @@ def bbcode_page():
         active_providers=ACTIVE_PROVIDERS,
         gofile_enabled=GOFILE_ENABLED,
         filester_enabled=FILESTER_ENABLED,
+        filester_merge_parts_guide_url=FILESTER_MERGE_PARTS_GUIDE_URL,
+        filester_merge_parts_guide_size=FILESTER_MERGE_PARTS_GUIDE_SIZE,
         filester_split_mode=FILESTER_SPLIT_MODE,
         stashdb_scenes_base=STASHDB_SCENES_BASE,
         goonbox_base_url=GOONBOX_BASE_URL,

@@ -415,6 +415,8 @@
       activeProviders: {{ active_providers|tojson }},
       gofileEnabled: {{ gofile_enabled|tojson }},
       filesterEnabled: {{ filester_enabled|tojson }},
+      filesterMergePartsGuideUrl: {{ filester_merge_parts_guide_url|tojson }},
+      filesterMergePartsGuideSize: {{ filester_merge_parts_guide_size|tojson }},
       goonboxBaseUrl: {{ goonbox_base_url|tojson }},
       gifyuBaseUrl: {{ gifyu_base_url|tojson }},
       gifHost: {{ gif_host|tojson }},
@@ -951,6 +953,9 @@
 [/TR]
 `
         : "";
+      const filesterMergeFooter = filesterOn && PAGE_DATA.filesterMergePartsGuideUrl
+        ? `[SIZE=${PAGE_DATA.filesterMergePartsGuideSize || 3}]Click [URL='${PAGE_DATA.filesterMergePartsGuideUrl}']here[/URL] to learn how to merge split video parts[/SIZE]`
+        : "";
       const output = `[HEADING=1]${actressPart} - ${title}[/HEADING]
 ${imageBbcode}
 [TABLE width="50%"]
@@ -963,7 +968,7 @@ ${imageBbcode}
 [TR]
 [td width="25%"]Studio[/td][td width="75%"]${formatStudioBbcode(studio)}[/td]
 [/TR]
-${threadRow}${linkRow}${mirrorRow}[/TABLE]`;
+${threadRow}${linkRow}${mirrorRow}[/TABLE]${filesterMergeFooter}`;
       outputEl.value = output;
     }
 
