@@ -344,6 +344,30 @@ def folder_url(folder_id):
     return f"{FILESTER_SITE_URL}/f/{folder_id}" if folder_id else FILESTER_SITE_URL
 
 
+def file_identifier_from_response(raw: dict) -> str:
+    """Return slug or file id from a Filester upload JSON body."""
+    if not isinstance(raw, dict):
+        return ""
+    slug = str(raw.get("slug") or "").strip()
+    if slug:
+        return slug
+    file_id = raw.get("file_id")
+    if file_id is not None and str(file_id).strip():
+        return str(file_id).strip()
+    data = raw.get("data")
+    if isinstance(data, dict):
+        slug = str(data.get("slug") or "").strip()
+        if slug:
+            return slug
+        fid = data.get("id")
+        if fid is not None and str(fid).strip():
+            return str(fid).strip()
+        uuid_val = str(data.get("uuid") or "").strip()
+        if uuid_val:
+            return uuid_val
+    return ""
+
+
 def gallery_url_from_response(raw: dict) -> str:
     """Build a public download URL from a Filester upload JSON response."""
     if not isinstance(raw, dict):

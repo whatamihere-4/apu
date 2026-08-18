@@ -17,6 +17,14 @@ import filester_upload
 import gofile_upload
 import size_limits
 from upload_common import UploadResult, format_size  # noqa: F401 (re-exported)
+from upload_resume import (
+    UploadResumeState,
+    UploadedPart,
+    load_upload_resume_state,
+    resume_job_dir,
+    save_upload_resume_state,
+    delete_upload_resume_state,
+)
 
 
 def _env_int(name: str, default: int) -> int:
@@ -254,6 +262,36 @@ def _upload_gofile(
     return _normalize_gofile(raw)
 
 
+def _result_from_resume_part(
+    part: UploadedPart,
+    src: str,
+    split_mode: str,
+    *,
+    total_parts: int | None = None,
+) -> UploadResult:
+    part_count = int(total_parts or max(part.part_index, 1))
+    meta = {
+        "part_count": part_count,
+        "part_index": part.part_index,
+        "original_basename": os.path.basename(src),
+        "split_mode": split_mode,
+    }
+    if part.upload_response:
+        return _normalize_filester(part.upload_response, part=meta)
+    return UploadResult(
+        ok=bool(part.slug),
+        provider="filester",
+        gallery_url=filester_upload.gallery_url_from_response(part.upload_response)
+        or (f"{filester_upload.FILESTER_SITE_URL}/d/{part.slug}" if part.slug else ""),
+        raw=part.upload_response or {"slug": part.slug},
+        part_index=part.part_index,
+        part_count=meta["part_count"],
+        original_basename=meta["original_basename"],
+        was_split=part.part_index > 0 and meta["part_count"] > 1,
+        split_mode=split_mode,
+    )
+
+
 def _upload_filester_parts(
     src: str,
     *,
@@ -263,6 +301,8 @@ def _upload_filester_parts(
     on_log,
     job_id,
     delete_source: bool,
+    resume_dir: str | None = None,
+    resume_state: UploadResumeState | None = None,
 ) -> tuple[list[UploadResult], str | None]:
     from downloader import TransferCancelled
 
@@ -277,17 +317,65 @@ def _upload_filester_parts(
         else None
     )
 
+    if resume_dir and resume_state is None:
+        resume_state = load_upload_resume_state(resume_dir) or UploadResumeState()
+    if resume_state is None:
+        resume_state = UploadResumeState()
+    if resume_dir:
+        resume_state.source_path = src
+
+    skip_part_indices = resume_state.skip_part_indices()
+    if skip_part_indices and on_log:
+        on_log(
+            f"[Filester] Resuming upload — {len(skip_part_indices)} part(s) "
+            f"already on Filester; skipping re-upload"
+        )
+
     if not needs_split:
+        if resume_state.parts and resume_state.upload_complete():
+            results.append(
+                _result_from_resume_part(resume_state.parts[0], src, split_mode)
+            )
+            return results, upload_folder_id
         raw = filester_upload.upload_file(
             src,
             folder_id=upload_folder_id,
             on_progress=on_progress,
             should_cancel=should_cancel,
         )
-        results.append(_normalize_filester(raw))
+        result = _normalize_filester(raw)
+        results.append(result)
+        if resume_dir and result.ok:
+            slug = filester_upload.file_identifier_from_response(raw)
+            if slug:
+                resume_state.was_split = False
+                resume_state.total_parts = 1
+                resume_state.append_part_if_new(
+                    UploadedPart(
+                        part_index=1,
+                        filename=os.path.basename(src),
+                        size_bytes=size,
+                        slug=slug,
+                        upload_response=raw,
+                    )
+                )
+                save_upload_resume_state(resume_dir, resume_state)
         return results, upload_folder_id
 
-    token = job_id or uuid.uuid4().hex[:8]
+    for part in resume_state.parts:
+        results.append(
+            _result_from_resume_part(
+                part,
+                src,
+                split_mode,
+                total_parts=resume_state.total_parts,
+            )
+        )
+
+    if resume_state.upload_complete():
+        return results, upload_folder_id
+
+    token = (job_id or "").strip() or uuid.uuid4().hex[:8]
     out_dir = os.path.join(os.path.dirname(src) or ".", f".split_{token}")
     os.makedirs(out_dir, exist_ok=True)
     original_basename = os.path.basename(src)
@@ -320,6 +408,18 @@ def _upload_filester_parts(
         if should_cancel and should_cancel():
             raise TransferCancelled("Upload cancelled")
 
+    def _on_parts_planned(count: int) -> None:
+        resume_state.total_parts = count
+        resume_state.was_split = count > 1
+        if resume_dir:
+            save_upload_resume_state(resume_dir, resume_state)
+
+    split_kwargs = {
+        "skip_part_indices": skip_part_indices,
+        "reuse_existing_parts": bool(skip_part_indices) or bool(resume_dir),
+        "on_parts_planned": _on_parts_planned,
+    }
+
     if split_mode == "ffmpeg":
         part_source = file_splitter.iter_upload_parts(
             src,
@@ -327,7 +427,7 @@ def _upload_filester_parts(
             out_dir,
             on_log=on_log,
             should_cancel=should_cancel,
-            delete_source=delete_source,
+            delete_source=delete_source and not skip_part_indices,
             ffmpeg_timeout=FILESTER_FFMPEG_TIMEOUT,
         )
     elif split_mode == "ffmpeg_slice":
@@ -337,10 +437,11 @@ def _upload_filester_parts(
             out_dir,
             on_log=on_log,
             should_cancel=should_cancel,
-            delete_source=delete_source,
+            delete_source=delete_source and not skip_part_indices,
             ffmpeg_timeout=FILESTER_FFMPEG_TIMEOUT,
             ffprobe_keyframe_timeout=FILESTER_FFPROBE_TIMEOUT,
             extract_backend=SPLITTER_EXTRACT_BACKEND,
+            **split_kwargs,
         )
     else:
         part_source = byte_splitter.iter_upload_parts(
@@ -348,10 +449,13 @@ def _upload_filester_parts(
             out_dir,
             FILESTER_MAX_PART_BYTES,
             skip_check=_skip_check,
-            delete_source=delete_source,
+            delete_source=delete_source and not skip_part_indices,
+            on_log=on_log,
+            **split_kwargs,
         )
 
     last_part: dict | None = None
+    upload_complete = False
     try:
         for part in part_source:
             if should_cancel and should_cancel():
@@ -360,6 +464,8 @@ def _upload_filester_parts(
             last_part = part
             part_count = int(part.get("part_count") or 1)
             part_index = int(part.get("part_index") or 0)
+            if part_index in skip_part_indices:
+                continue
             if split_progress is not None and part_count > 1 and part_index > 0:
                 split_progress.register_part(
                     part_index,
@@ -381,7 +487,21 @@ def _upload_filester_parts(
                 on_progress=part_on_progress,
                 should_cancel=should_cancel,
             )
-            results.append(_normalize_filester(raw, part=part))
+            result = _normalize_filester(raw, part=part)
+            slug = filester_upload.file_identifier_from_response(raw)
+            if resume_dir and result.ok and slug:
+                uploaded = UploadedPart(
+                    part_index=part_index or 1,
+                    filename=part.get("filename") or os.path.basename(part_path),
+                    size_bytes=int(part.get("size_bytes") or 0),
+                    slug=slug,
+                    upload_response=raw,
+                )
+                if resume_state.append_part_if_new(uploaded):
+                    resume_state.was_split = part_count > 1
+                    resume_state.total_parts = part_count
+                    save_upload_resume_state(resume_dir, resume_state)
+            results.append(result)
             if split_progress is not None and part_count > 1 and part_index > 0:
                 split_progress.complete_part(part_index)
             if not part.get("is_source"):
@@ -390,7 +510,12 @@ def _upload_filester_parts(
                 except OSError:
                     pass
 
-        if on_log and last_part and last_part.get("part_count", 1) > 1:
+        upload_complete = bool(last_part) and (
+            not resume_state.total_parts
+            or len(resume_state.parts) >= int(resume_state.total_parts or 0)
+        )
+
+        if on_log and last_part and last_part.get("part_count", 1) > 1 and upload_complete:
             stem, ext = os.path.splitext(
                 last_part.get("original_basename") or os.path.basename(src)
             )
@@ -418,7 +543,12 @@ def _upload_filester_parts(
                     f"Windows: copy /b {original}.part001+...+{original}"
                 )
     finally:
-        shutil.rmtree(out_dir, ignore_errors=True)
+        if resume_dir:
+            if upload_complete:
+                shutil.rmtree(out_dir, ignore_errors=True)
+                delete_upload_resume_state(resume_dir)
+        else:
+            shutil.rmtree(out_dir, ignore_errors=True)
 
     return results, upload_folder_id
 
@@ -432,6 +562,8 @@ def upload_source(
     on_log=None,
     job_id=None,
     delete_source_after_upload: bool = False,
+    resume_dir: str | None = None,
+    resume_state: UploadResumeState | None = None,
 ) -> tuple[list[UploadResult], str | None, str | None]:
     """Upload a file or directory to all enabled/feasible providers.
 
@@ -494,6 +626,8 @@ def upload_source(
                 on_log=on_log,
                 job_id=job_id,
                 delete_source=delete_source_after_upload and not gofile_ran,
+                resume_dir=resume_dir,
+                resume_state=resume_state,
             )
             src_results.extend(fs_results)
             if effective_fs_folder:

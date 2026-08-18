@@ -64,6 +64,10 @@ def iter_upload_parts(
     skip_check: Callable[[], None] | None = None,
     *,
     delete_source: bool = True,
+    skip_part_indices: frozenset[int] = frozenset(),
+    reuse_existing_parts: bool = False,
+    on_log=None,
+    on_parts_planned=None,
 ) -> Iterator[dict]:
     """
     Yield upload parts one at a time.
@@ -100,22 +104,45 @@ def iter_upload_parts(
     # e.g. movie.mp4.part001 — extension stays on the basename, not the end of the part name.
     part_prefix = source.name if not base_name else f"{stem}{suffix}"
 
+    if on_parts_planned:
+        on_parts_planned(num_parts)
+
     for idx in range(num_parts):
         offset = idx * part_size_bytes
         part_size = min(part_size_bytes, total_size - offset)
         part_name = f"{part_prefix}.part{idx + 1:03d}"
         part_path = output_dir / part_name
+        part_no = idx + 1
+        if part_no in skip_part_indices:
+            continue
+        if reuse_existing_parts and part_path.is_file():
+            actual = part_path.stat().st_size
+            if actual == part_size:
+                if on_log:
+                    on_log(f"Reusing existing part {part_no}/{num_parts}: {part_name}")
+                yield {
+                    "path": str(part_path),
+                    "filename": part_name,
+                    "size_bytes": part_size,
+                    "part_index": part_no,
+                    "part_count": num_parts,
+                    "is_source": False,
+                    "original_basename": source.name,
+                    "split_mode": "bytes",
+                    "reused_existing": True,
+                }
+                continue
         _extract_part(source, part_path, offset, part_size, skip_check=skip_check)
         yield {
             "path": str(part_path),
             "filename": part_name,
             "size_bytes": part_size,
-            "part_index": idx + 1,
+            "part_index": part_no,
             "part_count": num_parts,
             "is_source": False,
             "original_basename": source.name,
             "split_mode": "bytes",
         }
 
-    if delete_source:
+    if delete_source and not skip_part_indices:
         source.unlink()

@@ -51,6 +51,13 @@ from oshash_remote import fetch_oshash_from_url
 from gif_host import gif_encode_limits, resolved_gif_host
 from queue_persist import track_add, track_remove
 from queue_api import register_queue_routes
+from upload_resume import (
+    delete_upload_resume_state,
+    load_interrupted_job,
+    clear_interrupted_job,
+    resume_job_dir,
+)
+from upload_watchdog import run_watchdog_once, watchdog_settings
 import server_scan
 
 app = Flask(__name__)
@@ -6052,6 +6059,17 @@ def api_jobs():
     return jsonify(safe)
 
 
+@app.route("/api/upload_watchdog/check")
+def api_upload_watchdog_check():
+    """Single upload-speed watchdog check (used by scripts/upload-watchdog.sh)."""
+    dry_run = request.args.get("dry_run", "").strip().lower() in ("1", "true", "yes")
+    result = run_watchdog_once(jobs, HASHES_DIR, dry_run=dry_run)
+    status = 200
+    if result.get("action") == "status_unreachable":
+        status = 503
+    return jsonify(result), status
+
+
 @app.route("/api/job/<job_id>")
 def api_job_status(job_id):
     job = jobs.get(job_id)
@@ -6078,6 +6096,7 @@ def api_upload_config():
         "filester_folder_sync": dict(_filester_sync_state),
         "server_scan": server_scan.get_scan_status(),
         "job_links_filename_only": JOB_LINKS_FILENAME_ONLY,
+        "upload_watchdog": watchdog_settings(),
     })
 
 
@@ -6429,18 +6448,48 @@ def _finalize_upload(
         status_bits.append("Filester skipped")
     jobs[job_id]["status_text"] = " — ".join(status_bits)
     jobs[job_id]["progress"] = {"type": "upload", "percent": 100}
+    delete_upload_resume_state(resume_job_dir(HASHES_DIR, job_id))
+
+
+def _restore_interrupted_upload_on_startup() -> int:
+    """Re-enqueue a job saved by the upload watchdog before container restart."""
+    record = load_interrupted_job(HASHES_DIR)
+    if not record:
+        return 0
+    job_id = (record.get("job_id") or "").strip() or uuid.uuid4().hex[:12]
+    kind = (record.get("job_kind") or "path").strip()
+    folder_id = (record.get("folder_id") or "").strip() or None
+    source_path = (record.get("source_path") or "").strip()
+    source_url = (record.get("source_url") or "").strip()
+    reason = (record.get("reason") or "upload watchdog restart").strip()
+    clear_interrupted_job(HASHES_DIR)
+
+    if source_path and os.path.isfile(source_path):
+        _start_path_job(source_path, folder_id, job_id=job_id, resume_upload=True)
+        _append_job_log(job_id, f"[Resume] {reason}")
+        print(f"[WATCHDOG] Restored path upload job {job_id}", flush=True)
+        return 1
+    if kind == "link" and source_url:
+        _start_link_job(source_url, folder_id, job_id=job_id, resume_upload=True)
+        if source_path:
+            jobs[job_id]["source_path"] = source_path
+        _append_job_log(job_id, f"[Resume] {reason}")
+        print(f"[WATCHDOG] Restored link upload job {job_id}", flush=True)
+        return 1
+    print(f"[WATCHDOG] Resume skipped — no file on disk ({source_path!r})", flush=True)
+    return 0
 
 
 # ── Upload endpoints ─────────────────────────────────────────────────
 
-def _start_link_job(url, folder_id=None):
+def _start_link_job(url, folder_id=None, *, job_id=None, resume_upload=False):
     """Create + enqueue a download-then-upload job for ``url``. Returns job_id."""
     url = (url or "").strip()
     folder_id = (folder_id or "").strip() or None
     folder_name = _folder_display_name(folder_id)
     print(f"[API] submit_link: {url!r}, folder_id={folder_id} ({folder_name})", flush=True)
 
-    job_id = uuid.uuid4().hex[:12]
+    job_id = (job_id or "").strip() or uuid.uuid4().hex[:12]
     jobs[job_id] = {
         "title": f"Link: {url[:80]}",
         "status": "queued",
@@ -6452,29 +6501,42 @@ def _start_link_job(url, folder_id=None):
         "job_kind": "link",
         "queued_at": datetime.now().isoformat(),
         "job_logs": [],
+        "resume_upload": bool(resume_upload),
     }
-    track_add(HASHES_DIR, {
-        "job_id": job_id,
-        "type": "link",
-        "url": url,
-        "folder_id": folder_id or "",
-        "folder_name": folder_name,
-    })
+    if not resume_upload:
+        track_add(HASHES_DIR, {
+            "job_id": job_id,
+            "type": "link",
+            "url": url,
+            "folder_id": folder_id or "",
+            "folder_name": folder_name,
+        })
 
     def _worker():
         track_remove(HASHES_DIR, job_id)
         downloaded_path = None
+        resume_dir = resume_job_dir(HASHES_DIR, job_id)
+        existing_path = (jobs[job_id].get("source_path") or "").strip()
         try:
             if _is_cancelled(job_id):
                 return
-            jobs[job_id]["status"] = "downloading"
-            jobs[job_id]["status_text"] = "Starting download..."
-            downloaded_path = download_file(
-                url,
-                on_progress=_make_dl_progress(job_id),
-                should_cancel=lambda: _is_cancelled(job_id),
-                on_log=lambda ln: _append_job_log(job_id, ln),
-            )
+            if resume_upload and existing_path and os.path.isfile(existing_path):
+                downloaded_path = existing_path
+                jobs[job_id]["status"] = "uploading"
+                jobs[job_id]["source_filename"] = os.path.basename(existing_path)
+                jobs[job_id]["status_text"] = (
+                    f"Resuming upload of {os.path.basename(existing_path)} → {folder_name}..."
+                )
+                _append_job_log(job_id, f"[Resume] Using existing file {existing_path}")
+            else:
+                jobs[job_id]["status"] = "downloading"
+                jobs[job_id]["status_text"] = "Starting download..."
+                downloaded_path = download_file(
+                    url,
+                    on_progress=_make_dl_progress(job_id),
+                    should_cancel=lambda: _is_cancelled(job_id),
+                    on_log=lambda ln: _append_job_log(job_id, ln),
+                )
 
             if _is_cancelled(job_id):
                 return
@@ -6482,6 +6544,7 @@ def _start_link_job(url, folder_id=None):
             jobs[job_id]["status"] = "uploading"
             fname = os.path.basename(downloaded_path)
             jobs[job_id]["source_filename"] = fname
+            jobs[job_id]["source_path"] = downloaded_path
             jobs[job_id]["progress"] = None
             is_video = _is_video_file(downloaded_path)
             if is_video:
@@ -6503,6 +6566,7 @@ def _start_link_job(url, folder_id=None):
                     on_log=lambda ln: _append_job_log(job_id, ln),
                     job_id=job_id,
                     delete_source_after_upload=True,
+                    resume_dir=resume_dir,
                 )
             finally:
                 if is_video:
@@ -6543,15 +6607,12 @@ def _start_link_job(url, folder_id=None):
             if downloaded_path and os.path.exists(downloaded_path):
                 if _is_video_file(downloaded_path):
                     _join_parallel_upload_sidecars(job_id, timeout=30.0)
-                try:
-                    bn = os.path.basename(downloaded_path)
-                    os.remove(downloaded_path)
-                    if not _is_cancelled(job_id):
-                        _append_job_log(job_id, f"Removed partial download: {bn}")
-                    print(f"[CLEANUP] Deleted partial {downloaded_path}", flush=True)
-                except OSError as rm_e:
-                    if not _is_cancelled(job_id):
-                        _append_job_log(job_id, f"Could not remove partial file: {rm_e}")
+                if not _is_cancelled(job_id):
+                    _append_job_log(
+                        job_id,
+                        f"Keeping file on disk for retry/resume: "
+                        f"{os.path.basename(downloaded_path)}",
+                    )
             elif not _is_cancelled(job_id):
                 _append_job_log(
                     job_id,
@@ -6614,14 +6675,14 @@ def api_submit_link():
     return jsonify({"job_id": job_id, "queued_at": jobs[job_id].get("queued_at")})
 
 
-def _start_path_job(path, folder_id=None):
+def _start_path_job(path, folder_id=None, *, job_id=None, resume_upload=False):
     """Create + enqueue an upload job for an existing ``path``. Returns job_id."""
     path = (path or "").strip()
     folder_id = (folder_id or "").strip() or None
     folder_name = _folder_display_name(folder_id)
     print(f"[API] upload_path: {path!r}, folder_id={folder_id} ({folder_name})", flush=True)
 
-    job_id = uuid.uuid4().hex[:12]
+    job_id = (job_id or "").strip() or uuid.uuid4().hex[:12]
     display_name = os.path.basename(path)
     jobs[job_id] = {
         "title": f"File: {display_name}",
@@ -6634,17 +6695,20 @@ def _start_path_job(path, folder_id=None):
         "job_kind": "path",
         "queued_at": datetime.now().isoformat(),
         "job_logs": [],
+        "resume_upload": bool(resume_upload),
     }
-    track_add(HASHES_DIR, {
-        "job_id": job_id,
-        "type": "path",
-        "path": path,
-        "folder_id": folder_id or "",
-        "folder_name": folder_name,
-    })
+    if not resume_upload:
+        track_add(HASHES_DIR, {
+            "job_id": job_id,
+            "type": "path",
+            "path": path,
+            "folder_id": folder_id or "",
+            "folder_name": folder_name,
+        })
 
     def _worker():
         track_remove(HASHES_DIR, job_id)
+        resume_dir = resume_job_dir(HASHES_DIR, job_id)
         try:
             if _is_cancelled(job_id):
                 return
@@ -6654,7 +6718,12 @@ def _start_path_job(path, folder_id=None):
             if os.path.isfile(path):
                 jobs[job_id]["source_filename"] = os.path.basename(path)
             is_vid_file = os.path.isfile(path) and _is_video_file(path)
-            if is_vid_file:
+            if resume_upload:
+                jobs[job_id]["status_text"] = (
+                    f"Resuming upload of {os.path.basename(path)} → {folder_name}..."
+                )
+                _append_job_log(job_id, "[Resume] Continuing Filester upload from saved state")
+            elif is_vid_file:
                 jobs[job_id]["status_text"] = (
                     f"Uploading {os.path.basename(path)} "
                     f"(thumbnails → hash alongside upload) → {folder_name}..."
@@ -6673,6 +6742,7 @@ def _start_path_job(path, folder_id=None):
                     should_cancel=lambda: _is_cancelled(job_id),
                     on_log=lambda ln: _append_job_log(job_id, ln),
                     job_id=job_id,
+                    resume_dir=resume_dir,
                 )
             finally:
                 if is_vid_file:
@@ -6747,6 +6817,9 @@ if __name__ == "__main__":
     )
     if _env_yes("RESTORE_QUEUE", default="1"):
         try:
+            restored_watchdog = _restore_interrupted_upload_on_startup()
+            if restored_watchdog:
+                print(f"[apu] Restored {restored_watchdog} interrupted upload job(s)", flush=True)
             restored = _restore_pending_queue()
             print(f"[apu] Restored {restored} pending job(s) from disk", flush=True)
         except Exception as e:

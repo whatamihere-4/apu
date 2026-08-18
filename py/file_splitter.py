@@ -745,7 +745,7 @@ def iter_upload_parts(
             "split_mode": "ffmpeg",
         }
 
-    if delete_source:
+    if delete_source and not skip_part_indices:
         try:
             os.remove(path)
         except OSError:
@@ -959,6 +959,9 @@ def iter_upload_parts_sliced(
     ffmpeg_timeout: int = 1800,
     ffprobe_keyframe_timeout: int | None = None,
     extract_backend: str | None = None,
+    skip_part_indices: frozenset[int] = frozenset(),
+    reuse_existing_parts: bool = False,
+    on_parts_planned=None,
 ):
     """Yield one ffmpeg-sliced part at a time (~source + one part on disk).
 
@@ -1069,6 +1072,8 @@ def iter_upload_parts_sliced(
 
     original = base
     num_parts = len(part_starts)
+    if on_parts_planned:
+        on_parts_planned(num_parts)
     for idx, start in enumerate(part_starts):
         _check_cancel(should_cancel)
 
@@ -1078,8 +1083,28 @@ def iter_upload_parts_sliced(
 
         part_name = f"{stem}.PART{idx + 1}{ext}"
         part_path = os.path.join(output_dir, part_name)
+        part_no = idx + 1
+        if part_no in skip_part_indices:
+            continue
+        if reuse_existing_parts and os.path.isfile(part_path):
+            part_size = os.path.getsize(part_path)
+            if part_size > 0 and part_size <= max_bytes:
+                if on_log:
+                    on_log(f"Reusing existing part {part_no}/{num_parts}: {part_name}")
+                yield {
+                    "path": part_path,
+                    "filename": part_name,
+                    "size_bytes": part_size,
+                    "part_index": part_no,
+                    "part_count": num_parts,
+                    "is_source": False,
+                    "original_basename": original,
+                    "split_mode": "ffmpeg_slice",
+                    "reused_existing": True,
+                }
+                continue
         if on_log:
-            on_log(f"Splitting part {idx + 1}/{num_parts}: {part_name}")
+            on_log(f"Splitting part {part_no}/{num_parts}: {part_name}")
         _extract_single_segment(
             path,
             part_path,
@@ -1114,7 +1139,7 @@ def iter_upload_parts_sliced(
             "split_mode": "ffmpeg_slice",
         }
 
-    if delete_source:
+    if delete_source and not skip_part_indices:
         try:
             os.remove(path)
         except OSError:
