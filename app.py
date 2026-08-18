@@ -907,6 +907,7 @@ def api_resolve_studio():
     }
     if gallery_url and GOFILE_ENABLED:
         payload["gallery_link"] = gallery_url
+        payload["studio_folder_url"] = gallery_url
         payload["gallery_match"] = meta.get("folder_match")
     fs_gallery = meta.get("filester_gallery_link")
     if fs_gallery:

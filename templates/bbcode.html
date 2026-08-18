@@ -429,7 +429,9 @@
       mode: (PAGE_DATA.splitMode || PAGE_DATA.filesterSplitMode || "bytes").trim(),
     };
     let threadUrl = "";
-    let filesterGalleryLink = (PAGE_DATA.galleryFilester || "").trim();
+    let studioFolderUrl = "";
+    let studioFolderFilesterUrl = "";
+    let studioResolveTimer = null;
     const cachedFileByName = new Map();
 
     const actressListEl = document.getElementById("actress-list");
@@ -893,6 +895,17 @@
       return (p.get("gallery_filester") || "").trim();
     }
 
+    function formatStudioBbcode(studioLabel) {
+      const label = String(studioLabel || "").trim();
+      if (!label) return "";
+      const url =
+        (isGofileOn() && studioFolderUrl) ||
+        (isFilesterOn() && studioFolderFilesterUrl) ||
+        "";
+      if (!url) return label;
+      return `[URL='${url}']${label}[/URL]`;
+    }
+
     function composeBbcode() {
       const actressPart = actressHeadingPart();
       const title = fields["title"].value.trim();
@@ -948,7 +961,7 @@ ${imageBbcode}
 [td width="25%"]Date[/td][td width="75%"]${uploadDate}[/td]
 [/TR]
 [TR]
-[td width="25%"]Studio[/td][td width="75%"]${studio}[/td]
+[td width="25%"]Studio[/td][td width="75%"]${formatStudioBbcode(studio)}[/td]
 [/TR]
 ${threadRow}${linkRow}${mirrorRow}[/TABLE]`;
       outputEl.value = output;
@@ -1286,7 +1299,12 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]`;
 
     async function applyStudioResolution(studioName, opts = {}) {
       const studio = String(studioName || fields["studio"].value || "").trim();
-      if (!studio) return null;
+      if (!studio) {
+        studioFolderUrl = "";
+        studioFolderFilesterUrl = "";
+        composeBbcode();
+        return null;
+      }
       const network = String(opts.network || "").trim();
       try {
         const r = await fetch("/api/resolve_studio", {
@@ -1295,11 +1313,24 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]`;
           body: JSON.stringify({ studio, network }),
         });
         const data = await r.json();
-        if (!r.ok || data.error) return null;
+        if (!r.ok || data.error) {
+          studioFolderUrl = "";
+          studioFolderFilesterUrl = "";
+          composeBbcode();
+          return null;
+        }
         if (data.studio) fields["studio"].value = data.studio;
+        studioFolderUrl = (data.studio_folder_url || data.gallery_link || "").trim();
+        studioFolderFilesterUrl = (data.filester_gallery_link || "").trim();
         if (data.thread_url) threadUrl = data.thread_url;
-        if (data.filester_gallery_link) setFilesterLinkValue(data.filester_gallery_link);
         const fillGallery = opts.fillGallery !== false;
+        if (
+          fillGallery &&
+          data.filester_gallery_link &&
+          !getFilesterLinkValue()
+        ) {
+          setFilesterLinkValue(data.filester_gallery_link);
+        }
         if (fillGallery && isGofileOn() && data.gallery_link && !fields["gallery-link"].value.trim()) {
           fields["gallery-link"].value = data.gallery_link;
         }
@@ -1308,6 +1339,19 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]`;
       } catch (_err) {
         return null;
       }
+    }
+
+    function scheduleStudioFolderResolve() {
+      clearTimeout(studioResolveTimer);
+      studioResolveTimer = setTimeout(() => {
+        const s = fields["studio"].value.trim();
+        if (s) void applyStudioResolution(s, { fillGallery: false });
+        else {
+          studioFolderUrl = "";
+          studioFolderFilesterUrl = "";
+          composeBbcode();
+        }
+      }, 500);
     }
 
     async function loadCachedSceneEntry(fn) {
@@ -1328,6 +1372,7 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]`;
         }
         if (bb.studio && !fields["studio"].value.trim()) {
           fields["studio"].value = bb.studio;
+          await applyStudioResolution(bb.studio, { fillGallery: false });
         }
         if (bb.gallery_link) {
           if (isGofileOn() && !fields["gallery-link"].value.trim()) {
@@ -1614,7 +1659,12 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]`;
       }
     });
     stashdbAutofillBtn.addEventListener("click", () => { void autofillFromStashdb(); });
-    fieldIds.forEach((id) => fields[id].addEventListener("input", composeBbcode));
+    fieldIds.forEach((id) => {
+      fields[id].addEventListener("input", () => {
+        composeBbcode();
+        if (id === "studio") scheduleStudioFolderResolve();
+      });
+    });
     imageNextBtn.addEventListener("click", () => showSceneImage(imageIndex + 1));
 
     const imageBbcodeEl = fields["image-bbcode"];
