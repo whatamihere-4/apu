@@ -296,6 +296,31 @@
         </div>
 
         <div class="field">
+          <label for="slr-scene-link">SexLikeReal scene link (preview GIF)</label>
+          <div class="row">
+            <div class="field" style="margin:0; flex:1; min-width:0;">
+              <input
+                type="url"
+                id="slr-scene-link"
+                placeholder="https://www.sexlikereal.com/scenes/…-71907"
+              >
+            </div>
+            <button
+              type="button"
+              class="btn secondary"
+              id="slr-gif-download-btn"
+              disabled
+              title="Download SLR 300p preview as GIF (server encode)"
+            >
+              Download GIF
+            </button>
+          </div>
+          <p style="margin:0.35rem 0 0; font-size:0.8rem; color:var(--muted);">
+            Paste an SLR /scenes/ URL when autofill did not set one. Also used by “Download PNGs + SLR GIF”.
+          </p>
+        </div>
+
+        <div class="field">
           <label for="image-bbcode">Image Embed BBCode (cover + thumbs + GIF)</label>
           <textarea id="image-bbcode" placeholder="[IMG]cover[/IMG][IMG]thumbs[/IMG][IMG]gif[/IMG]"></textarea>
           <div class="image-tools" style="margin-top:0.5rem;">
@@ -434,6 +459,8 @@
     const cachedFileHintEl = document.getElementById("cached-file-hint");
     const stashdbAutofillBtn = document.getElementById("stashdb-autofill-btn");
     const stashdbStatusEl = document.getElementById("stashdb-status");
+    const slrSceneLinkEl = document.getElementById("slr-scene-link");
+    const slrGifDownloadBtn = document.getElementById("slr-gif-download-btn");
 
     const fieldIds = [
       "title", "resolution", "upload-date", "studio",
@@ -1021,6 +1048,68 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]`;
       return null;
     }
 
+    function resolveSlrPreviewCode() {
+      const manual = extractSlrCodeFromUrl(slrSceneLinkEl && slrSceneLinkEl.value);
+      if (manual) return manual;
+      return slrPreviewCode;
+    }
+
+    function firstSlrSceneUrl(urls) {
+      if (!Array.isArray(urls)) return "";
+      for (const u of urls) {
+        if (extractSlrCodeFromUrl(u)) return String(u || "").trim();
+      }
+      return "";
+    }
+
+    function refreshSlrGifControls() {
+      const code = resolveSlrPreviewCode();
+      if (slrGifDownloadBtn) slrGifDownloadBtn.disabled = !code;
+      if (downloadBothBtn && activeSceneId) {
+        if (code) {
+          downloadBothBtn.textContent = "Download PNGs + SLR GIF";
+          downloadBothBtn.title =
+            "Cover PNG, thumbnail sheet (if ready), and SLR VR preview as GIF (fetched on click).";
+        } else {
+          downloadBothBtn.textContent = "Download both PNGs";
+          downloadBothBtn.title = "StashDB cover PNG + thumbnail sheet";
+        }
+      }
+    }
+
+    async function downloadSlrPreviewGif(code) {
+      const sceneCode = (code || resolveSlrPreviewCode() || "").trim();
+      if (!sceneCode) {
+        helperStatusEl.className = "err";
+        helperStatusEl.textContent = "Enter a SexLikeReal /scenes/… link first.";
+        return false;
+      }
+      helperStatusEl.className = "";
+      helperStatusEl.textContent = "SLR preview → GIF (server)…";
+      const gr = await fetch("/api/slr_preview_gif?code=" + encodeURIComponent(sceneCode));
+      if (!gr.ok) {
+        let msg = gr.statusText || String(gr.status);
+        try {
+          const errBody = await gr.json();
+          if (errBody && errBody.error) msg = errBody.error;
+        } catch (_j) { /* ignore */ }
+        throw new Error(msg);
+      }
+      const blob = await gr.blob();
+      const objUrl = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = objUrl;
+      a.rel = "noopener";
+      a.setAttribute("download", `slr_preview_${sceneCode}.gif`);
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(objUrl);
+      helperStatusEl.className = "ok";
+      helperStatusEl.textContent = `SLR preview GIF downloaded (${sceneCode}).`;
+      return true;
+    }
+
     function thumbSheetBasename() {
       const f = activeFilename || "";
       if (!f) return "thumbs.png";
@@ -1089,29 +1178,10 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]`;
         await new Promise((r) => setTimeout(r, 450));
         go(thumbSheetUrl(true), thumbSheetBasename());
       }
-      if (!slrPreviewCode) return;
+      if (!resolveSlrPreviewCode()) return;
       await new Promise((r) => setTimeout(r, 450));
       try {
-        helperStatusEl.textContent = "SLR preview → GIF (server)…";
-        const gr = await fetch("/api/slr_preview_gif?code=" + encodeURIComponent(slrPreviewCode));
-        if (!gr.ok) {
-          let msg = gr.statusText || String(gr.status);
-          try {
-            const errBody = await gr.json();
-            if (errBody && errBody.error) msg = errBody.error;
-          } catch (_j) { /* ignore */ }
-          throw new Error(msg);
-        }
-        const blob = await gr.blob();
-        const objUrl = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = objUrl;
-        a.rel = "noopener";
-        a.setAttribute("download", `slr_preview_${slrPreviewCode}.gif`);
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        URL.revokeObjectURL(objUrl);
+        await downloadSlrPreviewGif(resolveSlrPreviewCode());
         helperStatusEl.className = "ok";
         helperStatusEl.textContent = "Downloads started (incl. SLR GIF).";
       } catch (e) {
@@ -1194,14 +1264,11 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]`;
         showSceneImage(0);
 
         slrPreviewCode = findSlrSceneCode(scene.urls || []);
-        if (slrPreviewCode) {
-          downloadBothBtn.textContent = "Download PNGs + SLR GIF";
-          downloadBothBtn.title =
-            "Cover PNG, thumbnail sheet (if ready), and SLR VR preview as GIF (fetched on click).";
-        } else {
-          downloadBothBtn.textContent = "Download both PNGs";
-          downloadBothBtn.title = "StashDB cover PNG + thumbnail sheet";
+        const slrUrl = firstSlrSceneUrl(scene.urls || []);
+        if (slrUrl && slrSceneLinkEl && !slrSceneLinkEl.value.trim()) {
+          slrSceneLinkEl.value = slrUrl;
         }
+        refreshSlrGifControls();
 
         composeBbcode();
         helperStatusEl.className = "ok";
@@ -1212,8 +1279,7 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]`;
         helperStatusEl.textContent = "Could not load scene.";
         downloadBothBtn.disabled = true;
         slrPreviewCode = null;
-        downloadBothBtn.textContent = "Download both PNGs";
-        downloadBothBtn.title = "StashDB cover PNG + thumbnail sheet";
+        refreshSlrGifControls();
         addActressRow();
       }
     }
@@ -1523,6 +1589,17 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]`;
     addActressBtn.addEventListener("click", () => addActressRow());
     copyBtn.addEventListener("click", copyToClipboard);
     downloadBothBtn.addEventListener("click", () => { void downloadBothPngs(); });
+    if (slrGifDownloadBtn) {
+      slrGifDownloadBtn.addEventListener("click", () => {
+        void downloadSlrPreviewGif().catch((e) => {
+          helperStatusEl.className = "err";
+          helperStatusEl.textContent = "SLR GIF failed: " + (e && e.message ? e.message : e);
+        });
+      });
+    }
+    if (slrSceneLinkEl) {
+      slrSceneLinkEl.addEventListener("input", refreshSlrGifControls);
+    }
     cachedFileSelectEl.addEventListener("change", () => {
       void applyCachedFileSelection(cachedFileSelectEl.value);
     });
@@ -1637,6 +1714,7 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]`;
         await loadScene();
       }
       if (!actressListEl.querySelector(".actress-row")) addActressRow();
+      refreshSlrGifControls();
       composeBbcode();
     })();
   </script>
