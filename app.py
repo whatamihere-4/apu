@@ -529,6 +529,9 @@ def _stashdb_studio_names(studio_obj) -> tuple[str, str | None]:
 
 def _should_strip_vr_from_label(label: str) -> bool:
     cf = str(label or "").casefold()
+    # Brand names like KinkVR / BaDoinkVR — keep literal VR for folder lookup.
+    if cf.endswith("vr"):
+        return False
     return not any(p in cf for p in _VR_PUN_SUBSTRINGS)
 
 
@@ -794,12 +797,12 @@ def _studio_alias_lookup(stashdb_studio: str) -> dict | None:
 def _resolve_studio_for_autofill(
     stashdb_studio: str, network_studio: str | None = None
 ) -> tuple[str, str | None, dict]:
-    """Map StashDB substudio (+ optional parent network) → BBCode label + GoFile gallery URL.
+    """Map StashDB substudio (+ optional parent network) → BBCode label + gallery URL.
 
-    Display: substudio only when ``gofile-folders.json`` has a match for the substudio; otherwise
-    ``{substudio} / {network}`` when a parent network exists (``(Network)`` suffix stripped).
-    Gallery: match substudio folders (exact, normalized, VR-stripped), then parent network
-    (exact, normalized), then manual ``studio_aliases.json`` fallback only.
+    Display: substudio only when the substudio has its own folder on GoFile or Filester.
+    ``{substudio} / {network}`` only when the substudio folder is missing but the parent
+    network folder exists (or as a last-resort label). Manual ``studio_aliases.json`` overrides
+    network fallback when the substudio folder is not found automatically.
     """
     substudio = str(stashdb_studio or "").strip()
     network_raw = str(network_studio or "").strip()
@@ -828,46 +831,43 @@ def _resolve_studio_for_autofill(
         if thread_url:
             meta["thread_url"] = thread_url
 
-    def _attach_filester_gallery() -> None:
-        if not FILESTER_ENABLED:
+    def _attach_filester_network_fallback() -> None:
+        if not FILESTER_ENABLED or meta.get("filester_gallery_link"):
             return
-        fs_url, fs_mode, fs_label = _filester_folder_url_search(substudio, strip_vr=True)
-        if not fs_url and network:
-            fs_url, fs_mode, fs_label = _filester_folder_url_search(network, strip_vr=False)
+        fs_url, fs_mode, fs_label = _filester_folder_url_search(network, strip_vr=False)
         if fs_url:
             meta["filester_gallery_link"] = fs_url
             meta["filester_folder_match"] = fs_mode
             if fs_label:
                 meta["filester_folder_label"] = fs_label
 
-    gallery, match_mode, matched_label = (
+    gallery: str | None = None
+
+    gf_url, gf_mode, gf_label = (
         _gofile_folder_url_search(substudio, strip_vr=True)
         if GOFILE_ENABLED
         else (None, None, None)
     )
-    if gallery:
-        meta["folder_match"] = match_mode
-        meta["folder_label"] = matched_label
-        meta["matched_level"] = "studio"
+    fs_url, fs_mode, fs_label = (
+        _filester_folder_url_search(substudio, strip_vr=True)
+        if FILESTER_ENABLED
+        else (None, None, None)
+    )
+    if gf_url or fs_url:
+        if gf_url:
+            gallery = gf_url
+            meta["folder_match"] = gf_mode
+            meta["folder_label"] = gf_label
+            meta["matched_level"] = "studio"
+        if fs_url:
+            meta["filester_gallery_link"] = fs_url
+            meta["filester_folder_match"] = fs_mode
+            if fs_label:
+                meta["filester_folder_label"] = fs_label
+            if not meta.get("matched_level"):
+                meta["matched_level"] = "studio"
         _attach_thread()
-        _attach_filester_gallery()
         return substudio, gallery, meta
-
-    if network:
-        gallery, match_mode, matched_label = (
-            _gofile_folder_url_search(network, strip_vr=False)
-            if GOFILE_ENABLED
-            else (None, None, None)
-        )
-        if gallery:
-            meta["folder_match"] = match_mode
-            meta["folder_label"] = matched_label
-            meta["matched_level"] = "network"
-            _attach_thread()
-            _attach_filester_gallery()
-            return _display_with_network(), gallery, meta
-
-    studio_out = _display_with_network()
 
     alias = _studio_alias_lookup(substudio)
     if alias:
@@ -883,22 +883,38 @@ def _resolve_studio_for_autofill(
                     meta["folder_match"] = match_mode
                     meta["folder_label"] = matched_label or folder_label
                     meta["matched_level"] = "alias"
-            elif FILESTER_ENABLED:
-                fs_url, fs_mode, fs_label = _filester_folder_url_search(
+            if FILESTER_ENABLED and not meta.get("filester_gallery_link"):
+                fs_alias_url, fs_alias_mode, fs_alias_label = _filester_folder_url_search(
                     folder_label, strip_vr=False
                 )
-                if fs_url:
-                    meta["filester_gallery_link"] = fs_url
-                    meta["filester_folder_match"] = fs_mode
-                    if fs_label:
-                        meta["filester_folder_label"] = fs_label
-                    meta["matched_level"] = "alias"
-        display = (alias.get("studio_display") or "").strip()
-        if display:
-            studio_out = display
+                if fs_alias_url:
+                    meta["filester_gallery_link"] = fs_alias_url
+                    meta["filester_folder_match"] = fs_alias_mode
+                    if fs_alias_label:
+                        meta["filester_folder_label"] = fs_alias_label
+                    if not meta.get("matched_level"):
+                        meta["matched_level"] = "alias"
+        studio_out = (alias.get("studio_display") or "").strip() or substudio
+        _attach_thread()
+        return studio_out, gallery, meta
 
+    if network:
+        gallery, match_mode, matched_label = (
+            _gofile_folder_url_search(network, strip_vr=False)
+            if GOFILE_ENABLED
+            else (None, None, None)
+        )
+        if gallery:
+            meta["folder_match"] = match_mode
+            meta["folder_label"] = matched_label
+            meta["matched_level"] = "network"
+            _attach_thread()
+            _attach_filester_network_fallback()
+            return _display_with_network(), gallery, meta
+
+    studio_out = _display_with_network()
     _attach_thread()
-    _attach_filester_gallery()
+    _attach_filester_network_fallback()
     return studio_out, gallery, meta
 
 
