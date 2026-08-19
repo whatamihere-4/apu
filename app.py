@@ -227,6 +227,7 @@ FILESTER_MERGE_PARTS_GUIDE_SIZE = max(1, min(_env_int("FILESTER_MERGE_PARTS_GUID
 
 GOONBOX_BASE_URL = (os.environ.get("GOONBOX_BASE_URL") or "https://goonbox.cr").rstrip("/")
 GIFYU_BASE_URL = (os.environ.get("GIFYU_BASE_URL") or "https://gifyu.com").rstrip("/")
+GIFYU_TO_ALBUM = (os.environ.get("GIFYU_TO_ALBUM") or "").strip()
 PIXHOST_API_URL = (os.environ.get("PIXHOST_API_URL") or "https://api.pixhost.cc").rstrip("/")
 GIF_HOST = resolved_gif_host()
 GIF_ENCODE_LIMITS = gif_encode_limits(GIF_HOST)
@@ -1940,6 +1941,7 @@ def bbcode_page():
         stashdb_scenes_base=STASHDB_SCENES_BASE,
         goonbox_base_url=GOONBOX_BASE_URL,
         gifyu_base_url=GIFYU_BASE_URL,
+        gifyu_to_album=GIFYU_TO_ALBUM,
         gif_host=GIF_HOST,
         pixhost_enabled=(GIF_HOST == "pixhost"),
     )

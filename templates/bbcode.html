@@ -419,6 +419,7 @@
       filesterMergePartsGuideSize: {{ filester_merge_parts_guide_size|tojson }},
       goonboxBaseUrl: {{ goonbox_base_url|tojson }},
       gifyuBaseUrl: {{ gifyu_base_url|tojson }},
+      gifyuToAlbum: {{ gifyu_to_album|tojson }},
       gifHost: {{ gif_host|tojson }},
       pixhostEnabled: {{ pixhost_enabled|tojson }},
       stashdbScenesBase: {{ stashdb_scenes_base|tojson }},
@@ -590,11 +591,29 @@
       return d.innerHTML;
     }
 
+    /** Wrap bare Gifyu CDN [IMG] tags with a [URL] to the image page (Chevereto PUP omits this). */
+    function wrapGifyuImageBbcode(text) {
+      const base = (PAGE_DATA.gifyuBaseUrl || "https://gifyu.com").replace(/\/+$/, "");
+      return String(text || "").replace(
+        /\[(?:IMG|img)\](https?:\/\/[^[\]]*gifyu[^[\]]*\/images\/([a-zA-Z0-9]+)(?:\.[a-zA-Z0-9]+)?)\[\/(?:IMG|img)\]/gi,
+        (match, directUrl, imageId, offset, whole) => {
+          const pageUrl = `${base}/image/${imageId}`;
+          const before = whole.slice(Math.max(0, offset - pageUrl.length - 6), offset);
+          if (before.endsWith(`[URL=${pageUrl}]`) || before.endsWith(`[url=${pageUrl}]`)) {
+            return match;
+          }
+          return `[URL=${pageUrl}][IMG]${directUrl}[/IMG][/URL]`;
+        }
+      );
+    }
+
     /** Image BBCode: single line (no whitespace). Legacy Chevereto `.md.gif` previews strip `md` so GIFs animate. */
     function sanitizeImageBbcodeInput(text) {
-      return String(text || "")
-        .replace(/\s/g, "")
-        .replace(/\.md\.gif/gi, ".gif");
+      return wrapGifyuImageBbcode(
+        String(text || "")
+          .replace(/\s/g, "")
+          .replace(/\.md\.gif/gi, ".gif")
+      );
     }
 
     function appendImageBbcode(bbcode) {
@@ -1889,10 +1908,15 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]${filesterMergeFooter}`;
   <script id="gifyu-pup-bootstrap">
     (function () {
       const GIFYU_BASE = {{ gifyu_base_url|tojson }};
+      const GIFYU_TO_ALBUM = {{ gifyu_to_album|tojson }};
       const base = GIFYU_BASE.replace(/\/+$/, "");
+      let gifyuUploadUrl = base + "/upload";
+      if (GIFYU_TO_ALBUM) {
+        gifyuUploadUrl += "?toAlbum=" + encodeURIComponent(GIFYU_TO_ALBUM);
+      }
       const script = document.createElement("script");
       script.src = base + "/sdk/pup.js";
-      script.setAttribute("data-url", base + "/upload");
+      script.setAttribute("data-url", gifyuUploadUrl);
       script.setAttribute("data-mode", "manual");
       script.setAttribute("data-auto-insert", "bbcode-embed");
       script.async = true;
