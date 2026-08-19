@@ -28,7 +28,7 @@ class UploadWatchdogTests(unittest.TestCase):
         self.assertFalse(result["restart_required"])
 
     @patch.dict("os.environ", {"UPLOAD_WATCHDOG_ENABLED": "true", "UPLOAD_WATCHDOG_COOLDOWN_SEC": "0"}, clear=False)
-    def test_slow_upload_can_restart(self) -> None:
+    def test_slow_upload_requires_container_restart(self) -> None:
         jobs = {
             "abc": {
                 "status": "uploading",
@@ -43,6 +43,7 @@ class UploadWatchdogTests(unittest.TestCase):
                 result = run_watchdog_once(jobs, self.cache_dir)
         self.assertEqual(result["action"], "restart")
         self.assertTrue(result["restart_required"])
+        self.assertIn("interrupted_job", result)
 
 
 if __name__ == "__main__":

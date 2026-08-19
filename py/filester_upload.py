@@ -18,8 +18,15 @@ from pathlib import Path
 import requests
 from requests_toolbelt import MultipartEncoder, MultipartEncoderMonitor
 
-from downloader import TransferCancelled
+from downloader import TransferCancelled, UploadRestartRequested
 from upload_common import format_size
+
+
+def _check_upload_abort(should_cancel, should_restart) -> None:
+    if should_restart and should_restart():
+        raise UploadRestartRequested("Upload restart requested")
+    if should_cancel and should_cancel():
+        raise TransferCancelled("Upload cancelled")
 
 
 FILESTER_API_KEY = os.environ.get("FILESTER_API_KEY", "")
@@ -586,6 +593,7 @@ def _upload_post_once(
     folder_id: str | None,
     on_progress,
     should_cancel,
+    should_restart=None,
     on_log=None,
 ) -> requests.Response:
     """POST multipart upload; runs in a worker thread when verify recovery is enabled."""
@@ -595,8 +603,7 @@ def _upload_post_once(
     bytes_complete_at = [None]
 
     def progress_callback(monitor):
-        if should_cancel and should_cancel():
-            raise TransferCancelled("Upload cancelled")
+        _check_upload_abort(should_cancel, should_restart)
         if (
             bytes_complete_at[0] is None
             and monitor.len
@@ -646,6 +653,7 @@ def _wait_for_upload_response(
     folder_id: str | None,
     on_progress,
     should_cancel,
+    should_restart=None,
     on_log=None,
 ) -> requests.Response | dict:
     """Run upload POST with folder-listing recovery when the HTTP ACK hangs."""
@@ -657,6 +665,7 @@ def _wait_for_upload_response(
             folder_id=folder_id,
             on_progress=on_progress,
             should_cancel=should_cancel,
+            should_restart=should_restart,
             on_log=on_log,
         )
 
@@ -682,6 +691,7 @@ def _wait_for_upload_response(
                 folder_id=folder_id,
                 on_progress=progress_with_bytes,
                 should_cancel=should_cancel,
+                should_restart=should_restart,
                 on_log=on_log,
             )
         except Exception as exc:  # noqa: BLE001
@@ -697,8 +707,7 @@ def _wait_for_upload_response(
     max_verify = FILESTER_UPLOAD_VERIFY_MAX_SEC
 
     while not done.wait(timeout=poll):
-        if should_cancel and should_cancel():
-            raise TransferCancelled("Upload cancelled")
+        _check_upload_abort(should_cancel, should_restart)
         if error_box:
             raise error_box["error"]
         completed_at = bytes_complete_at[0]
@@ -745,12 +754,14 @@ def upload_file(
     folder_id=None,
     on_progress=None,
     should_cancel=None,
+    should_restart=None,
     on_log=None,
 ):
     """Upload a single file to Filester.
 
     on_progress(pct, uploaded, total, speed, eta_seconds) is called at most
     once per second. should_cancel(): if it returns True, abort (TransferCancelled).
+    should_restart(): if it returns True, abort and retry this upload (UploadRestartRequested).
     Returns the raw Filester JSON response.
     """
     filename = os.path.basename(filepath)
@@ -762,8 +773,7 @@ def upload_file(
 
     last_err = None
     for attempt in range(1, 4):
-        if should_cancel and should_cancel():
-            raise TransferCancelled("Upload cancelled")
+        _check_upload_abort(should_cancel, should_restart)
         try:
             r = _wait_for_upload_response(
                 filepath,
@@ -772,6 +782,7 @@ def upload_file(
                 folder_id=folder_id,
                 on_progress=on_progress,
                 should_cancel=should_cancel,
+                should_restart=should_restart,
                 on_log=on_log,
             )
             if isinstance(r, dict):
@@ -791,6 +802,8 @@ def upload_file(
                 r.raise_for_status()
                 result = r.json()
             break
+        except UploadRestartRequested:
+            raise
         except TransferCancelled:
             raise
         except requests.RequestException as e:

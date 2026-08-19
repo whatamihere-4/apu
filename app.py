@@ -6038,7 +6038,7 @@ def api_jobs():
 
 @app.route("/api/upload_watchdog/check")
 def api_upload_watchdog_check():
-    """Single upload-speed watchdog check (used by scripts/upload-watchdog.sh)."""
+    """Upload-speed watchdog check (polled by apu-watchdog sidecar). dry_run=1 skips resume prep."""
     dry_run = request.args.get("dry_run", "").strip().lower() in ("1", "true", "yes")
     result = run_watchdog_once(jobs, HASHES_DIR, dry_run=dry_run)
     status = 200

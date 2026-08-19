@@ -1,4 +1,4 @@
-"""Persist split/upload progress for upload watchdog resume."""
+"""Persist split/upload progress for resume across upload retries."""
 
 from __future__ import annotations
 
@@ -212,3 +212,4 @@ def clear_interrupted_job(cache_dir: str) -> None:
         os.remove(path)
     except OSError:
         pass
+

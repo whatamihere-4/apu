@@ -1,0 +1,6 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+COPY py/upload_watchdog_sidecar.py /app/upload_watchdog_sidecar.py
+
+CMD ["python", "-u", "/app/upload_watchdog_sidecar.py"]

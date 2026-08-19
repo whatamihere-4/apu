@@ -21,6 +21,29 @@ services:
     networks:
       - app_net
 
+  # Polls apu for slow uploads and restarts the apu container (Docker socket required).
+  # Enable: UPLOAD_WATCHDOG_ENABLED=true and docker compose --profile watchdog up -d
+  apu-watchdog:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.watchdog
+    image: apu-watchdog:latest
+    container_name: apu-watchdog
+    restart: unless-stopped
+    profiles:
+      - watchdog
+    depends_on:
+      - apu
+    env_file:
+      - .env
+    environment:
+      APU_WATCHDOG_URL: http://apu:5000
+      APU_CONTAINER_NAME: apu
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - app_net
+
   hasher-http:
     build:
       context: .

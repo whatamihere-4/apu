@@ -365,6 +365,35 @@ def _upload_gofile(
     return _normalize_gofile(raw)
 
 
+def _upload_filester_file(
+    filepath: str,
+    *,
+    folder_id,
+    on_progress,
+    should_cancel,
+    should_restart=None,
+    on_log=None,
+) -> dict:
+    from downloader import TransferCancelled, UploadRestartRequested
+
+    while True:
+        try:
+            return filester_upload.upload_file(
+                filepath,
+                folder_id=folder_id,
+                on_progress=on_progress,
+                should_cancel=should_cancel,
+                should_restart=should_restart,
+                on_log=on_log,
+            )
+        except UploadRestartRequested:
+            if on_log:
+                on_log("[Filester] Watchdog: restarting this part upload...")
+            continue
+        except TransferCancelled:
+            raise
+
+
 def _result_from_resume_part(
     part: UploadedPart,
     src: str,
@@ -401,6 +430,7 @@ def _upload_filester_parts(
     folder_id,
     on_progress,
     should_cancel,
+    should_restart=None,
     on_log,
     job_id,
     delete_source: bool,
@@ -443,11 +473,12 @@ def _upload_filester_parts(
                 _result_from_resume_part(resume_state.parts[0], src, split_mode)
             )
             return results, upload_folder_id
-        raw = filester_upload.upload_file(
+        raw = _upload_filester_file(
             src,
             folder_id=upload_folder_id,
             on_progress=on_progress,
             should_cancel=should_cancel,
+            should_restart=should_restart,
             on_log=on_log,
         )
         result = _normalize_filester(raw)
@@ -609,11 +640,12 @@ def _upload_filester_parts(
             part_on_progress = on_progress
             if split_progress is not None and part_count > 1 and part_index > 0:
                 part_on_progress = split_progress.wrap_part(part_index)
-            raw = filester_upload.upload_file(
+            raw = _upload_filester_file(
                 part_path,
                 folder_id=target_folder_id,
                 on_progress=part_on_progress,
                 should_cancel=should_cancel,
+                should_restart=should_restart,
                 on_log=on_log,
             )
             result = _normalize_filester(raw, part=part)
@@ -688,6 +720,7 @@ def upload_source(
     filester_folder_id=None,
     on_progress=None,
     should_cancel=None,
+    should_restart=None,
     on_log=None,
     job_id=None,
     delete_source_after_upload: bool = False,
@@ -755,6 +788,7 @@ def upload_source(
                 folder_id=fs_folder,
                 on_progress=on_progress,
                 should_cancel=should_cancel,
+                should_restart=should_restart,
                 on_log=on_log,
                 job_id=job_id,
                 delete_source=delete_source_after_upload and not gofile_ran,

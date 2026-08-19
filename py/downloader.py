@@ -16,6 +16,10 @@ class TransferCancelled(Exception):
     """Raised when the user cancels an in-flight download (see should_cancel)."""
 
 
+class UploadRestartRequested(Exception):
+    """Raised when the upload watchdog requests restarting the current file/part upload."""
+
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "

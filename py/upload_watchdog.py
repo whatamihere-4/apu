@@ -1,6 +1,8 @@
-"""Upload speed watchdog — restart apu when Filester uploads stay too slow.
+"""Upload speed watchdog — detect slow Filester uploads for container restart.
 
 Only reacts during the ``uploading`` phase (not ``splitting`` or ``downloading``).
+When restart is required, persists job metadata so apu can resume after the
+apu-watchdog sidecar restarts the container.
 """
 from __future__ import annotations
 
@@ -10,10 +12,6 @@ import time
 from typing import Any
 
 from upload_resume import resume_job_dir, save_interrupted_job
-
-EXIT_OK = 0
-EXIT_ERROR = 1
-EXIT_RESTART = 2
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
