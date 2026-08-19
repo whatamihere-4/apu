@@ -433,6 +433,7 @@
     let threadUrl = "";
     let studioFolderUrl = "";
     let studioFolderFilesterUrl = "";
+    let studioLinkLabel = "";
     let studioResolveTimer = null;
     const cachedFileByName = new Map();
 
@@ -973,6 +974,23 @@
         (isFilesterOn() && studioFolderFilesterUrl) ||
         "";
       if (!url) return label;
+
+      let linkLabel = String(studioLinkLabel || "").trim();
+      const sep = " / ";
+      if (!linkLabel) {
+        const idx = label.lastIndexOf(sep);
+        if (idx >= 0) linkLabel = label.slice(idx + sep.length).trim();
+      }
+      if (linkLabel) {
+        const suffix = sep + linkLabel;
+        if (label.endsWith(suffix)) {
+          const prefix = label.slice(0, label.length - suffix.length);
+          return `${prefix}${sep}[URL='${url}']${linkLabel}[/URL]`;
+        }
+        if (label.toLowerCase() !== linkLabel.toLowerCase()) {
+          return `${label}${sep}[URL='${url}']${linkLabel}[/URL]`;
+        }
+      }
       return `[URL='${url}']${label}[/URL]`;
     }
 
@@ -1371,6 +1389,7 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]${filesterMergeFooter}`;
       if (!studio) {
         studioFolderUrl = "";
         studioFolderFilesterUrl = "";
+        studioLinkLabel = "";
         composeBbcode();
         return null;
       }
@@ -1385,10 +1404,18 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]${filesterMergeFooter}`;
         if (!r.ok || data.error) {
           studioFolderUrl = "";
           studioFolderFilesterUrl = "";
+          studioLinkLabel = "";
           composeBbcode();
           return null;
         }
-        if (data.studio) fields["studio"].value = data.studio;
+        const linkLabel = String(
+          data.studio_link_label || (data.meta && data.meta.studio_link_label) || ""
+        ).trim();
+        studioLinkLabel = linkLabel;
+        if (data.studio) {
+          const current = fields["studio"].value.trim();
+          if (!linkLabel || !current) fields["studio"].value = data.studio;
+        }
         studioFolderUrl = (data.studio_folder_url || data.gallery_link || "").trim();
         studioFolderFilesterUrl = (data.filester_gallery_link || "").trim();
         if (data.thread_url) threadUrl = data.thread_url;
@@ -1407,6 +1434,7 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]${filesterMergeFooter}`;
         else {
           studioFolderUrl = "";
           studioFolderFilesterUrl = "";
+          studioLinkLabel = "";
           composeBbcode();
         }
       }, 500);
@@ -1632,6 +1660,7 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]${filesterMergeFooter}`;
         if (data.thread_url) threadUrl = data.thread_url;
         studioFolderUrl = (data.studio_folder_url || data.gallery_link || "").trim();
         studioFolderFilesterUrl = (data.filester_gallery_link || "").trim();
+        studioLinkLabel = String(data.studio_link_label || "").trim();
         if (data.image_bbcode) {
           fields["image-bbcode"].value = sanitizeImageBbcodeInput(data.image_bbcode);
         }

@@ -576,6 +576,18 @@ def _stashdb_studio_names(studio_obj) -> tuple[str, str | None]:
     return substudio, network
 
 
+def _parse_studio_display_label(label: str) -> tuple[str, str | None]:
+    """Split a ``Substudio / Network`` display label into its parts."""
+    s = str(label or "").strip()
+    if " / " not in s:
+        return s, None
+    left, right = s.rsplit(" / ", 1)
+    left, right = left.strip(), right.strip()
+    if not left or not right:
+        return s, None
+    return left, _strip_network_suffix(right)
+
+
 def _should_strip_vr_from_label(label: str) -> bool:
     cf = str(label or "").casefold()
     # Brand names like KinkVR / BaDoinkVR — keep literal VR for folder lookup.
@@ -846,15 +858,21 @@ def _studio_alias_lookup(stashdb_studio: str) -> dict | None:
 def _resolve_studio_for_autofill(
     stashdb_studio: str, network_studio: str | None = None
 ) -> tuple[str, str | None, dict]:
-    """Map StashDB substudio (+ optional parent network) → BBCode label + gallery URL.
+    """Map StashDB substudio (+ optional parent network) → studio label + gallery URL.
 
-    Display: substudio only when the substudio has its own folder on GoFile or Filester.
-    ``{substudio} / {network}`` only when the substudio folder is missing but the parent
-    network folder exists (or as a last-resort label). Manual ``studio_aliases.json`` overrides
-    network fallback when the substudio folder is not found automatically.
+    The returned studio label is always the substudio name (never rewritten to
+    ``{substudio} / {network}``). When the substudio folder is missing but a parent
+    network folder exists, ``meta["studio_link_label"]`` names the parent for BBCode
+    linking. Manual ``studio_aliases.json`` overrides network fallback when the
+    substudio folder is not found automatically.
     """
     substudio = str(stashdb_studio or "").strip()
     network_raw = str(network_studio or "").strip()
+    if not network_raw and " / " in substudio:
+        parsed_sub, parsed_net = _parse_studio_display_label(substudio)
+        if parsed_net:
+            substudio = parsed_sub
+            network_raw = parsed_net
     network = _strip_network_suffix(network_raw) if network_raw else ""
     meta: dict = {"alias_applied": False}
     if not substudio:
@@ -867,11 +885,6 @@ def _resolve_studio_for_autofill(
         meta["network_studio"] = network
         if network_raw and network_raw != network:
             meta["network_studio_raw"] = network_raw
-
-    def _display_with_network() -> str:
-        if has_distinct_network:
-            return f"{substudio} / {network}"
-        return substudio
 
     def _attach_thread() -> None:
         thread_url = _studio_thread_lookup(substudio)
@@ -948,23 +961,24 @@ def _resolve_studio_for_autofill(
         return studio_out, gallery, meta
 
     if network:
-        gallery, match_mode, matched_label = (
-            _gofile_folder_url_search(network, strip_vr=False)
-            if GOFILE_ENABLED
-            else (None, None, None)
-        )
-        if gallery:
-            meta["folder_match"] = match_mode
-            meta["folder_label"] = matched_label
+        if GOFILE_ENABLED:
+            gf_net_url, gf_net_mode, gf_net_label = _gofile_folder_url_search(
+                network, strip_vr=False
+            )
+            if gf_net_url:
+                gallery = gf_net_url
+                meta["folder_match"] = gf_net_mode
+                meta["folder_label"] = gf_net_label
+        _attach_filester_network_fallback()
+        if gallery or meta.get("filester_gallery_link"):
             meta["matched_level"] = "network"
+            meta["studio_link_label"] = network
             _attach_thread()
-            _attach_filester_network_fallback()
-            return _display_with_network(), gallery, meta
+            return substudio, gallery, meta
 
-    studio_out = _display_with_network()
     _attach_thread()
     _attach_filester_network_fallback()
-    return studio_out, gallery, meta
+    return substudio, gallery, meta
 
 
 @app.route("/api/resolve_studio", methods=["POST"])
@@ -990,6 +1004,9 @@ def api_resolve_studio():
     fs_gallery = meta.get("filester_gallery_link")
     if fs_gallery:
         payload["filester_gallery_link"] = fs_gallery
+    link_label = (meta.get("studio_link_label") or "").strip()
+    if link_label:
+        payload["studio_link_label"] = link_label
     thread_url = meta.get("thread_url")
     if thread_url:
         payload["thread_url"] = thread_url
@@ -3142,6 +3159,9 @@ def api_stashdb_autofill():
     thread_url = studio_meta.get("thread_url")
     if thread_url:
         payload["thread_url"] = thread_url
+    link_label = (studio_meta.get("studio_link_label") or "").strip()
+    if link_label:
+        payload["studio_link_label"] = link_label
 
     return jsonify(payload)
 
