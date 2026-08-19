@@ -205,26 +205,7 @@ class SplitUploadCoordinator:
                                 f"(upload continues in studio folder): {exc}"
                             )
                         return None
-        self.maybe_apply_stashdb()
         return dest
-
-    def maybe_apply_stashdb(self) -> bool:
-        """Rename split folder and set thumbnail when StashDB metadata is available."""
-        self.sync_from_job()
-        if not self._dest_folder_id:
-            return False
-        meta = self._meta()
-        scene_title = (meta.get("scene_title") or "").strip()
-        if not scene_title:
-            return False
-        lock = self._folder_lock() if self._folder_lock else nullcontext()
-        with lock:
-            return filester_upload.apply_stashdb_to_split_folder(
-                self._dest_folder_id,
-                scene_title,
-                meta.get("cover_path"),
-                on_log=self._on_log,
-            )
 
     def upload_folder_for_part(self, part_index: int) -> str | None:
         _ = part_index
@@ -235,7 +216,6 @@ class SplitUploadCoordinator:
 
     def after_part_uploaded(self, part_index: int, raw: dict) -> None:
         _ = part_index, raw
-        self.maybe_apply_stashdb()
 
 
 _legacy = (os.environ.get("UPLOAD_PROVIDER") or "").strip().lower()

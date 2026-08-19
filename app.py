@@ -332,8 +332,50 @@ def _filester_split_job_accessors(job_id: str):
         job = jobs.get(job_id)
         if job is not None:
             job["filester_split_dest_folder_id"] = folder_id
+            _schedule_filester_split_stashdb_apply(job_id)
 
     return get_split_meta, set_split_dest_folder_id
+
+
+def _filester_split_stashdb_apply_worker(job_id: str) -> None:
+    job = jobs.get(job_id)
+    if not job:
+        return
+    dest = (job.get("filester_split_dest_folder_id") or "").strip()
+    match = job.get("stashdb_match") or {}
+    scene_title = (match.get("title") or "").strip()
+    if not dest or not scene_title:
+        return
+    log_fn = lambda ln: _append_job_log(job_id, ln)
+    with _filester_split_folder_lock(job_id):
+        apply_stashdb_to_split_folder(
+            dest,
+            scene_title,
+            job.get("stashdb_cover_path"),
+            on_log=log_fn,
+        )
+
+
+def _schedule_filester_split_stashdb_apply(job_id: str) -> None:
+    """Rename split folder + set thumbnail without blocking the upload worker."""
+    job = jobs.get(job_id)
+    if not job or not job.get("filester_split_active"):
+        return
+    dest = (job.get("filester_split_dest_folder_id") or "").strip()
+    match = job.get("stashdb_match") or {}
+    if not dest or not (match.get("title") or "").strip():
+        return
+    existing = job.get("_filester_stashdb_apply_thread")
+    if existing is not None and existing.is_alive():
+        return
+    t = threading.Thread(
+        target=_filester_split_stashdb_apply_worker,
+        args=(job_id,),
+        name=f"filester-stashdb-apply-{job_id}",
+        daemon=True,
+    )
+    job["_filester_stashdb_apply_thread"] = t
+    t.start()
 
 
 _filester_split_folder_locks: dict[str, threading.Lock] = {}
@@ -348,33 +390,16 @@ def _filester_split_folder_lock(job_id: str) -> threading.Lock:
 
 
 def _maybe_prepare_filester_split_folder(job_id: str) -> None:
-    """When StashDB matches during a split upload, rename the stem folder if it exists."""
+    """When StashDB matches during a split upload, rename the stem folder in the background."""
     job = jobs.get(job_id)
     if not job or not job.get("filester_split_active"):
         return
     if job.get("status") != "uploading":
         return
-    dest = (job.get("filester_split_dest_folder_id") or "").strip()
-    if not dest:
-        return
     match = job.get("stashdb_match") or {}
-    scene_title = (match.get("title") or "").strip()
-    if not scene_title:
+    if not (match.get("title") or "").strip():
         return
-    log_fn = lambda ln: _append_job_log(job_id, ln)
-    with _filester_split_folder_lock(job_id):
-        job = jobs.get(job_id)
-        if not job:
-            return
-        dest = (job.get("filester_split_dest_folder_id") or "").strip()
-        if not dest:
-            return
-        apply_stashdb_to_split_folder(
-            dest,
-            scene_title,
-            job.get("stashdb_cover_path"),
-            on_log=log_fn,
-        )
+    _schedule_filester_split_stashdb_apply(job_id)
 
 
 def _load_filester_folders():
@@ -6315,23 +6340,7 @@ def _finalize_upload(
         progressive_dest = (job.get("filester_split_dest_folder_id") or "").strip()
         if progressive_dest:
             effective_filester_folder = progressive_dest
-            match = job.get("stashdb_match") or {}
-            scene_title = (match.get("title") or "").strip()
-            cover_path = job.get("stashdb_cover_path")
-            log_fn = lambda ln: _append_job_log(job_id, ln)
-            if scene_title:
-                apply_stashdb_to_split_folder(
-                    progressive_dest,
-                    scene_title,
-                    cover_path,
-                    on_log=log_fn,
-                )
-            elif cover_path:
-                try_set_split_folder_thumbnail(
-                    progressive_dest,
-                    cover_path,
-                    on_log=log_fn,
-                )
+            _schedule_filester_split_stashdb_apply(job_id)
         else:
             studio_folder_id = (job.get("filester_folder_id") or "").strip()
             filester_raws = [
