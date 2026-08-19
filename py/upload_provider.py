@@ -401,7 +401,7 @@ def _upload_filester_parts(
         need_gb = size_limits.required_disk_gb(
             size, FILESTER_MAX_PART_BYTES, split_mode=split_mode
         )
-        on_log(f"[Filester] Split upload needs ~{need_gb:.1f} GiB peak disk")
+        on_log(f"[Filester] Split upload needs ~{need_gb:.1f} GiB free disk")
         if split_progress is not None:
             split_progress.set_splitting(source_bytes=size)
 

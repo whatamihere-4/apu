@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 import shutil
 
-from byte_splitter import required_disk_bytes
+from byte_splitter import additional_disk_bytes, required_disk_bytes
 
 _GIB = 1024**3
 
@@ -48,6 +48,7 @@ def max_processable_source_bytes(
     download_dir: str,
     free_gb: float | None = None,
     split_mode: str = "bytes",
+    source_on_disk: bool = True,
 ) -> int:
     """Largest single source file we can process on available disk."""
     if MAX_SOURCE_FILE_BYTES > 0:
@@ -61,6 +62,12 @@ def max_processable_source_bytes(
         budget_gb = free_gb if free_gb is not None else free_disk_gb(download_dir)
 
     usable_gb = budget_gb - MIN_FREE_DISK_GB
+    if source_on_disk:
+        if split_mode == "ffmpeg":
+            return int(max(0.0, usable_gb) * _GIB)
+        # Source already stored; only one scratch part is needed on top of it.
+        return int(max(0.0, usable_gb) * _GIB)
+
     if split_mode == "ffmpeg":
         return int(max(0.0, usable_gb / 2.0) * _GIB)
     part_gb = part_size_bytes / _GIB
@@ -72,9 +79,13 @@ def required_disk_gb(
     part_size_bytes: int,
     *,
     split_mode: str = "bytes",
+    source_on_disk: bool = True,
 ) -> float:
     if file_size <= 0:
         return float(MIN_FREE_DISK_GB)
+    if source_on_disk:
+        extra = additional_disk_bytes(file_size, part_size_bytes, split_mode=split_mode)
+        return extra / _GIB + MIN_FREE_DISK_GB
     return (
         required_disk_bytes(file_size, part_size_bytes, split_mode=split_mode) / _GIB
         + MIN_FREE_DISK_GB
@@ -87,11 +98,19 @@ def oversize_skip_reason(
     *,
     download_dir: str,
     split_mode: str = "bytes",
+    source_on_disk: bool = True,
 ) -> str | None:
     if not AUTO_SKIP_OVERSIZED or file_size <= 0:
         return None
+    if source_on_disk and split_mode != "ffmpeg":
+        # With the source already downloaded, byte/slice splits only need scratch
+        # space for one part — file size is not a separate disk constraint.
+        return None
     limit = max_processable_source_bytes(
-        part_size_bytes, download_dir=download_dir, split_mode=split_mode
+        part_size_bytes,
+        download_dir=download_dir,
+        split_mode=split_mode,
+        source_on_disk=source_on_disk,
     )
     if limit <= 0:
         return "File size unknown or disk budget too small"
@@ -109,15 +128,25 @@ def insufficient_disk_reason(
     *,
     download_dir: str,
     split_mode: str = "bytes",
+    source_on_disk: bool = True,
 ) -> str | None:
     """Return an error message when free space is below what this file needs."""
-    need_gb = required_disk_gb(file_size, part_size_bytes, split_mode=split_mode)
+    need_gb = required_disk_gb(
+        file_size,
+        part_size_bytes,
+        split_mode=split_mode,
+        source_on_disk=source_on_disk,
+    )
     have_gb = free_disk_gb(download_dir)
     if have_gb < need_gb:
+        part_gb = part_size_bytes / _GIB
         if split_mode == "ffmpeg":
-            detail = f"source + all parts (~2× file) + {MIN_FREE_DISK_GB:.0f} GiB headroom"
+            detail = (
+                f"parts alongside source (~{file_size / _GIB:.1f} GiB) + "
+                f"{MIN_FREE_DISK_GB:.0f} GiB headroom"
+            )
         else:
-            detail = f"source + one part + {MIN_FREE_DISK_GB:.0f} GiB headroom"
+            detail = f"one part (~{part_gb:.1f} GiB) + {MIN_FREE_DISK_GB:.0f} GiB headroom"
         return (
             f"Insufficient disk space: need {need_gb:.1f} GiB free ({detail}), "
             f"have {have_gb:.1f} GiB"

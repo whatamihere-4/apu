@@ -20,7 +20,7 @@ class SplitError(RuntimeError):
 
 
 def required_disk_bytes(file_size: int, part_size_bytes: int, *, split_mode: str = "bytes") -> int:
-    """Peak bytes on disk while processing one job."""
+    """Peak bytes on disk for a cold start (download + split, empty downloads dir)."""
     if file_size <= 0:
         return 0
     if file_size <= part_size_bytes:
@@ -30,6 +30,21 @@ def required_disk_bytes(file_size: int, part_size_bytes: int, *, split_mode: str
         return file_size * 2
     # bytes and ffmpeg_slice: source + one part at a time
     return file_size + part_size_bytes
+
+
+def additional_disk_bytes(
+    file_size: int, part_size_bytes: int, *, split_mode: str = "bytes"
+) -> int:
+    """Extra bytes needed when the source file is already on disk."""
+    if file_size <= 0:
+        return 0
+    if file_size <= part_size_bytes:
+        return 0
+    if split_mode == "ffmpeg":
+        # Parts are written alongside the existing source (~one more copy of the file).
+        return file_size
+    # bytes and ffmpeg_slice: one part at a time next to the source
+    return part_size_bytes
 
 
 def _extract_part(
