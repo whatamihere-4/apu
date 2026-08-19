@@ -109,6 +109,35 @@ class UploadVerifyRecoveryTests(unittest.TestCase):
         self.assertEqual(out["slug"], "recovered")
         self.assertTrue(out["verified_via_folder_listing"])
 
+    @patch.object(fs, "find_uploaded_file_in_folder")
+    @patch.object(fs, "_upload_post_once")
+    def test_recovers_when_post_errors_but_file_landed(self, post_mock, find_mock) -> None:
+        def fail_post(*_a, **kwargs):
+            bytes_sent_at = kwargs.get("bytes_sent_at")
+            if bytes_sent_at is not None:
+                bytes_sent_at[0] = time.time()
+            raise RuntimeError("connection reset")
+
+        post_mock.side_effect = fail_post
+        find_mock.return_value = {
+            "name": "clip.PART1.mp4",
+            "size": 123,
+            "url": "https://filester.me/d/recovered",
+            "id": 9,
+        }
+
+        out = fs._wait_for_upload_response(
+            "/tmp/clip.PART1.mp4",
+            filename="clip.PART1.mp4",
+            filesize=123,
+            folder_id="studio-folder",
+            on_progress=None,
+            should_cancel=None,
+        )
+        self.assertIsInstance(out, dict)
+        self.assertEqual(out["slug"], "recovered")
+        find_mock.assert_called()
+
 
 if __name__ == "__main__":
     unittest.main()
