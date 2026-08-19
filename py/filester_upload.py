@@ -65,6 +65,8 @@ FILESTER_UPLOAD_VERIFY_MAX_SEC = max(0, _env_int("FILESTER_UPLOAD_VERIFY_MAX_SEC
 FILESTER_UPLOAD_VERIFY_SIZE_TOLERANCE = max(
     0, _env_int("FILESTER_UPLOAD_VERIFY_SIZE_TOLERANCE", 0)
 )
+FILESTER_VERIFY_API_TIMEOUT = max(5, _env_int("FILESTER_VERIFY_API_TIMEOUT", 15))
+FILESTER_FOLDER_THUMBNAIL_ENABLED = _env_bool("FILESTER_FOLDER_THUMBNAIL_ENABLED", False)
 
 
 def _verify_size_tolerance(expected_size: int) -> int:
@@ -436,6 +438,7 @@ def set_folder_thumbnail(
     *,
     on_progress=None,
     should_cancel=None,
+    on_log=None,
 ) -> dict:
     """Upload a folder cover image (multipart), separate from adding a folder file.
 
@@ -446,6 +449,13 @@ def set_folder_thumbnail(
     This helper tries the documented-style thumbnail upload shape. If Filester returns
     404, capture the request from DevTools when setting a cover in the web manager.
     """
+    if not FILESTER_FOLDER_THUMBNAIL_ENABLED:
+        if on_log:
+            on_log(
+                "[Filester] Folder thumbnail skipped "
+                "(FILESTER_FOLDER_THUMBNAIL_ENABLED=0)"
+            )
+        raise RuntimeError("folder thumbnail uploads are disabled")
     fid = (folder_id or "").strip()
     if not fid:
         raise ValueError("folder id required")
@@ -485,7 +495,7 @@ def set_folder_thumbnail(
                     headers={**_auth_headers(), **extra_headers},
                     files={field_name: (filename, fp, content_type)},
                     data=extra_fields,
-                    timeout=120,
+                    timeout=30,
                 )
             if r.status_code == 404:
                 last_err = RuntimeError(f"HTTP 404 for {url}")
@@ -565,6 +575,7 @@ def search_account_files(
     folder_id: str | None = None,
     search: str = "",
     per_page: int = 50,
+    timeout: int | None = None,
 ) -> list[dict]:
     """Search account files (optionally scoped to one folder)."""
     params: dict = {"page": 1, "per_page": max(1, min(int(per_page), 100))}
@@ -578,7 +589,7 @@ def search_account_files(
         f"{FILESTER_BASE_URL}/api/v1/files",
         headers=_auth_headers(),
         params=params,
-        timeout=60,
+        timeout=timeout or FILESTER_VERIFY_API_TIMEOUT,
     )
     r.raise_for_status()
     body = r.json()
@@ -610,6 +621,7 @@ def find_uploaded_file_in_folder(
     *,
     size_tolerance: int | None = None,
     on_log=None,
+    allow_account_search: bool = True,
 ) -> dict | None:
     """Return a folder file row when ``filename`` is present at ``expected_size``."""
     fid = (folder_id or "").strip()
@@ -617,9 +629,10 @@ def find_uploaded_file_in_folder(
         return None
     tol = _verify_size_tolerance(expected_size) if size_tolerance is None else size_tolerance
     rows: list[dict] = []
+    api_timeout = FILESTER_VERIFY_API_TIMEOUT
     t0 = time.monotonic()
     try:
-        rows = list_folder_files(fid)
+        rows = list_folder_files(fid, timeout=api_timeout)
         if on_log:
             on_log(
                 f"[Filester] verify: folder list {len(rows)} file(s) in "
@@ -636,24 +649,29 @@ def find_uploaded_file_in_folder(
                 f"[Filester] verify: folder listing failed after "
                 f"{time.monotonic() - t0:.1f}s for {fid[:12]}…: {exc}"
             )
-    try:
-        t_search = time.monotonic()
-        search_rows = search_account_files(folder_id=fid, search=filename, per_page=50)
-        if on_log:
-            on_log(
-                f"[Filester] verify: account search returned {len(search_rows)} row(s) in "
-                f"{time.monotonic() - t_search:.1f}s"
+    if allow_account_search:
+        try:
+            t_search = time.monotonic()
+            search_rows = search_account_files(
+                folder_id=fid, search=filename, per_page=50, timeout=api_timeout,
             )
-        found = _find_upload_in_rows(search_rows, filename, expected_size, size_tolerance=tol)
-        if found:
             if on_log:
-                on_log(f"[Filester] verify: matched {filename!r} via account file search")
-            return found
-        if search_rows and not rows:
-            rows = search_rows
-    except requests.RequestException as exc:
-        if on_log:
-            on_log(f"[Filester] verify: account search failed: {exc}")
+                on_log(
+                    f"[Filester] verify: account search returned {len(search_rows)} row(s) in "
+                    f"{time.monotonic() - t_search:.1f}s"
+                )
+            found = _find_upload_in_rows(search_rows, filename, expected_size, size_tolerance=tol)
+            if found:
+                if on_log:
+                    on_log(f"[Filester] verify: matched {filename!r} via account file search")
+                return found
+            if search_rows and not rows:
+                rows = search_rows
+        except requests.RequestException as exc:
+            if on_log:
+                on_log(f"[Filester] verify: account search failed: {exc}")
+    elif on_log:
+        on_log("[Filester] verify: account search skipped (early poll)")
     if on_log:
         same_name = [
             r for r in rows
@@ -886,11 +904,20 @@ def _wait_for_upload_response(
                 f"[Filester] verify poll #{poll_count[0]} for {filename!r} "
                 f"({int(elapsed)}s since bytes sent)…"
             )
+        if done.is_set():
+            if on_log:
+                on_log(
+                    f"[Filester] {filename}: upload ACK arrived during verify poll; "
+                    f"skipping folder check"
+                )
+            break
+        allow_search = poll_count[0] >= 2 or elapsed >= 90
         row = find_uploaded_file_in_folder(
             folder_id,
             filename,
             filesize,
             on_log=on_log,
+            allow_account_search=allow_search,
         )
         if row:
             remote_size = int(row.get("size") or 0)
@@ -1057,13 +1084,17 @@ def move_files(file_identifiers: list[str], folder_id: str) -> dict:
     return body.get("data") if isinstance(body.get("data"), dict) else body
 
 
-def list_folder_files(folder_id: str) -> list[dict]:
+def list_folder_files(folder_id: str, *, timeout: int | None = None) -> list[dict]:
     """List files in a folder via GET /api/v1/folder/{identifier}/files."""
     fid = (folder_id or "").strip()
     if not fid:
         return []
     url = f"{FILESTER_BASE_URL}/api/v1/folder/{urllib.parse.quote(fid, safe='')}/files"
-    r = requests.get(url, headers=_auth_headers(), timeout=60)
+    r = requests.get(
+        url,
+        headers=_auth_headers(),
+        timeout=timeout or FILESTER_VERIFY_API_TIMEOUT,
+    )
     r.raise_for_status()
     body = r.json()
     if not body.get("success"):
@@ -1196,10 +1227,6 @@ def try_rename_folder(
     if not fid or not name:
         return False
 
-    row = find_folder_row(fid)
-    if row and sanitize_folder_name(str(row.get("name") or "")) == name:
-        return True
-
     attempts: list[tuple[str, str, dict]] = [
         (
             "PATCH",
@@ -1226,7 +1253,7 @@ def try_rename_folder(
                 url,
                 headers=_auth_headers(),
                 json=payload,
-                timeout=60,
+                timeout=15,
             )
             if r.status_code in (200, 201, 204):
                 data = r.json() if r.content else {}
@@ -1272,7 +1299,7 @@ def apply_stashdb_to_split_folder(
         on_log(f'[Filester] Split folder rename skipped or failed for "{display}"')
 
     cover = Path(cover_image_path) if cover_image_path else None
-    if cover and cover.is_file():
+    if cover and cover.is_file() and FILESTER_FOLDER_THUMBNAIL_ENABLED:
         if on_log:
             on_log(f"[Filester] Setting split folder thumbnail from {cover.name}…")
         t_thumb = time.monotonic()
@@ -1282,6 +1309,11 @@ def apply_stashdb_to_split_folder(
                 f"[Filester] Split folder thumbnail step finished in "
                 f"{time.monotonic() - t_thumb:.1f}s"
             )
+    elif on_log and cover and cover.is_file():
+        on_log(
+            "[Filester] Split folder thumbnail skipped "
+            "(FILESTER_FOLDER_THUMBNAIL_ENABLED=0)"
+        )
     elif on_log and cover_image_path:
         on_log("[Filester] Split folder thumbnail skipped (cover file missing)")
     return renamed
@@ -1335,8 +1367,15 @@ def try_set_split_folder_thumbnail(
     cover = Path(cover_image_path) if cover_image_path else None
     if not fid or not cover or not cover.is_file():
         return False
+    if not FILESTER_FOLDER_THUMBNAIL_ENABLED:
+        if on_log:
+            on_log(
+                "[Filester] Folder thumbnail skipped "
+                "(FILESTER_FOLDER_THUMBNAIL_ENABLED=0)"
+            )
+        return False
     try:
-        set_folder_thumbnail(fid, str(cover))
+        set_folder_thumbnail(fid, str(cover), on_log=on_log)
         if on_log:
             on_log(f"[Filester] Folder thumbnail updated ({folder_url(fid)})")
         return True

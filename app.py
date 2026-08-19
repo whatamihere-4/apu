@@ -45,9 +45,9 @@ from upload_progress import UploadProgressReporter
 from downloader import download_file, TransferCancelled
 from filester_upload import (
     apply_folder_blacklist,
-    apply_stashdb_to_split_folder,
     fetch_folder_map_from_api,
     organize_split_parts_into_folder,
+    try_rename_folder,
     try_set_split_folder_thumbnail,
 )
 from oshash_remote import fetch_oshash_from_url
@@ -349,36 +349,53 @@ def _filester_split_stashdb_apply_worker(job_id: str) -> None:
     log_fn = lambda ln: _append_job_log(job_id, ln)
     log_fn("[Filester] stashdb apply: background worker started")
     t0 = time.monotonic()
-    log_fn("[Filester] stashdb apply: acquiring folder lock…")
+    log_fn("[Filester] stashdb apply: acquiring folder lock for rename…")
     with _filester_split_folder_lock(job_id):
         log_fn(
             f"[Filester] stashdb apply: lock acquired after {time.monotonic() - t0:.1f}s"
         )
-        t_apply = time.monotonic()
-        apply_stashdb_to_split_folder(
-            dest,
-            scene_title,
-            job.get("stashdb_cover_path"),
-            on_log=log_fn,
-        )
+        t_rename = time.monotonic()
+        try_rename_folder(dest, scene_title, on_log=log_fn)
         log_fn(
-            f"[Filester] stashdb apply: finished in {time.monotonic() - t_apply:.1f}s "
-            f"(total {time.monotonic() - t0:.1f}s)"
+            f"[Filester] stashdb apply: rename step finished in "
+            f"{time.monotonic() - t_rename:.1f}s"
         )
+    cover = job.get("stashdb_cover_path")
+    if cover:
+        t_thumb = time.monotonic()
+        try_set_split_folder_thumbnail(dest, cover, on_log=log_fn)
+        log_fn(
+            f"[Filester] stashdb apply: thumbnail step finished in "
+            f"{time.monotonic() - t_thumb:.1f}s"
+        )
+    log_fn(
+        f"[Filester] stashdb apply: finished (total {time.monotonic() - t0:.1f}s)"
+    )
 
 
-def _schedule_filester_split_stashdb_apply(job_id: str) -> None:
+def _schedule_filester_split_stashdb_apply(job_id: str, *, force: bool = False) -> None:
     """Rename split folder + set thumbnail without blocking the upload worker."""
     job = jobs.get(job_id)
-    if not job or not job.get("filester_split_active"):
+    if not job:
         return
     dest = (job.get("filester_split_dest_folder_id") or "").strip()
     match = job.get("stashdb_match") or {}
     if not dest or not (match.get("title") or "").strip():
         return
+    if not force:
+        if job.get("status") == "uploading":
+            job["filester_stashdb_apply_pending"] = True
+            _append_job_log(
+                job_id,
+                "[Filester] stashdb apply: deferred until upload completes",
+            )
+            return
+        if not job.get("filester_split_active"):
+            return
     existing = job.get("_filester_stashdb_apply_thread")
     if existing is not None and existing.is_alive():
         return
+    job.pop("filester_stashdb_apply_pending", None)
     _append_job_log(job_id, "[Filester] stashdb apply: scheduling background worker")
     t = threading.Thread(
         target=_filester_split_stashdb_apply_worker,
@@ -6352,7 +6369,6 @@ def _finalize_upload(
         progressive_dest = (job.get("filester_split_dest_folder_id") or "").strip()
         if progressive_dest:
             effective_filester_folder = progressive_dest
-            _schedule_filester_split_stashdb_apply(job_id)
         else:
             studio_folder_id = (job.get("filester_folder_id") or "").strip()
             filester_raws = [
@@ -6396,6 +6412,12 @@ def _finalize_upload(
         filester_url = ""
 
     jobs[job_id]["status"] = "done"
+    job = jobs.get(job_id) or {}
+    job["filester_split_active"] = False
+    if (job.get("filester_split_dest_folder_id") or "").strip() and (
+        (job.get("stashdb_match") or {}).get("title")
+    ):
+        _schedule_filester_split_stashdb_apply(job_id, force=True)
     jobs[job_id]["upload_destinations"] = list({
         r.provider for r in results if r.ok and r.provider
     })
