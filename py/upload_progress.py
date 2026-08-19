@@ -117,7 +117,10 @@ class UploadProgressReporter:
             return
         self._current_part = idx
         rec["percent"] = round(float(pct), 1)
-        rec["status"] = "done" if pct >= 99.95 else "uploading"
+        if pct >= 99.95:
+            rec["status"] = "ack_wait"
+        else:
+            rec["status"] = "uploading"
         overall = self._overall_bytes()
         total_all = self._total_bytes()
         overall_pct = (overall / total_all * 100.0) if total_all > 0 else float(pct)

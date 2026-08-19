@@ -210,6 +210,7 @@
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted);
     }
     .upload-part-row.uploading .upload-part-label { color: var(--accent); font-weight: 600; }
+    .upload-part-row.ack_wait .upload-part-label { color: var(--warn); font-weight: 600; }
     .upload-part-row.done .upload-part-label { color: var(--success); }
     .upload-part-bar-wrap { height: 4px; }
     .upload-part-bar {
@@ -217,6 +218,7 @@
       transition: width 0.35s ease; width: 0%;
     }
     .upload-part-row.done .upload-part-bar { background: var(--success); }
+    .upload-part-row.ack_wait .upload-part-bar { background: var(--warn); }
     .upload-part-row.pending .upload-part-bar { background: var(--border); width: 0 !important; }
     .upload-part-pct { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
     .progress-bar.indeterminate {
@@ -592,13 +594,14 @@
             const pct = part.percent != null ? part.percent : 0;
             const lbl = part.label || `Part ${part.index}`;
             const sizeHint = part.size_fmt ? ` (${part.size_fmt})` : '';
+            const pctLabel = st === 'ack_wait' ? 'ACK…' : (st === 'pending' ? '…' : pct.toFixed(0) + '%');
             return (
               `<div class="upload-part-row ${escHtml(st)}">` +
                 `<span class="upload-part-label" title="${escHtml(lbl + sizeHint)}">${escHtml(lbl)}</span>` +
                 `<div class="progress-wrap upload-part-bar-wrap">` +
                   `<div class="upload-part-bar" style="width:${Math.max(0, Math.min(100, pct))}%"></div>` +
                 `</div>` +
-                `<span class="upload-part-pct">${st === 'pending' ? '…' : pct.toFixed(0) + '%'}</span>` +
+                `<span class="upload-part-pct">${pctLabel}</span>` +
               `</div>`
             );
           }).join('');
@@ -854,7 +857,7 @@
 
       const jobLogs = Array.isArray(job.job_logs) ? job.job_logs : [];
       const thumberLogs = Array.isArray(job.thumber_logs) ? job.thumber_logs : [];
-      const logs = [...jobLogs, ...thumberLogs];
+      const logs = jobLogs.length ? jobLogs : thumberLogs;
       if (logs.length) {
         logEl.style.display = 'block';
         const follow = logEl.dataset.thumberFollow !== '0';

@@ -61,6 +61,18 @@ FILESTER_UPLOAD_VERIFY_AFTER_SEC = max(0, _env_int("FILESTER_UPLOAD_VERIFY_AFTER
 FILESTER_UPLOAD_VERIFY_POLL_SEC = max(1, _env_int("FILESTER_UPLOAD_VERIFY_POLL_SEC", 15))
 # Extra time spent polling after VERIFY_AFTER before giving up (0 = unlimited).
 FILESTER_UPLOAD_VERIFY_MAX_SEC = max(0, _env_int("FILESTER_UPLOAD_VERIFY_MAX_SEC", 900))
+# Accept remote size within this many bytes of the local part (also uses 0.2% of file).
+FILESTER_UPLOAD_VERIFY_SIZE_TOLERANCE = max(
+    0, _env_int("FILESTER_UPLOAD_VERIFY_SIZE_TOLERANCE", 0)
+)
+
+
+def _verify_size_tolerance(expected_size: int) -> int:
+    if FILESTER_UPLOAD_VERIFY_SIZE_TOLERANCE > 0:
+        return FILESTER_UPLOAD_VERIFY_SIZE_TOLERANCE
+    if expected_size <= 0:
+        return 0
+    return max(1_048_576, int(expected_size * 0.002))
 
 
 def _auth_headers():
@@ -521,7 +533,7 @@ def _file_row_matches_upload(
     size_tolerance: int = 0,
 ) -> bool:
     name = str(row.get("name") or "").strip()
-    if name != filename:
+    if name.lower() != filename.lower():
         return False
     if expected_size <= 0:
         return True
@@ -534,49 +546,114 @@ def _file_row_matches_upload(
     return abs(remote_size - expected_size) <= size_tolerance
 
 
+def _summarize_folder_rows(rows: list[dict], *, limit: int = 5) -> str:
+    parts: list[str] = []
+    for row in rows[:limit]:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or "?")
+        try:
+            size = int(row.get("size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        parts.append(f"{name!r} ({size:,} B)")
+    if len(rows) > limit:
+        parts.append(f"…+{len(rows) - limit} more")
+    return "; ".join(parts) if parts else "(empty)"
+
+
+def search_account_files(
+    *,
+    folder_id: str | None = None,
+    search: str = "",
+    per_page: int = 50,
+) -> list[dict]:
+    """Search account files (optionally scoped to one folder)."""
+    params: dict = {"page": 1, "per_page": max(1, min(int(per_page), 100))}
+    fid = (folder_id or "").strip()
+    if fid:
+        params["folder"] = fid
+    q = (search or "").strip()
+    if q:
+        params["search"] = q
+    r = requests.get(
+        f"{FILESTER_BASE_URL}/api/v1/files",
+        headers=_auth_headers(),
+        params=params,
+        timeout=60,
+    )
+    r.raise_for_status()
+    body = r.json()
+    if not body.get("success"):
+        return []
+    data = body.get("data")
+    return data if isinstance(data, list) else []
+
+
+def _find_upload_in_rows(
+    rows: list[dict],
+    filename: str,
+    expected_size: int,
+    *,
+    size_tolerance: int,
+) -> dict | None:
+    for row in rows:
+        if isinstance(row, dict) and _file_row_matches_upload(
+            row, filename, expected_size, size_tolerance=size_tolerance
+        ):
+            return row
+    return None
+
+
 def find_uploaded_file_in_folder(
     folder_id: str | None,
     filename: str,
     expected_size: int,
     *,
-    size_tolerance: int = 0,
+    size_tolerance: int | None = None,
     on_log=None,
 ) -> dict | None:
     """Return a folder file row when ``filename`` is present at ``expected_size``."""
     fid = (folder_id or "").strip()
     if not fid:
         return None
+    tol = _verify_size_tolerance(expected_size) if size_tolerance is None else size_tolerance
+    rows: list[dict] = []
     try:
         rows = list_folder_files(fid)
+        found = _find_upload_in_rows(rows, filename, expected_size, size_tolerance=tol)
+        if found:
+            return found
     except requests.RequestException as exc:
         if on_log:
             on_log(f"[Filester] verify: folder listing failed for {fid[:12]}…: {exc}")
-        return None
-    for row in rows:
-        if isinstance(row, dict) and _file_row_matches_upload(
-            row, filename, expected_size, size_tolerance=size_tolerance
-        ):
-            return row
+    try:
+        search_rows = search_account_files(folder_id=fid, search=filename, per_page=50)
+        found = _find_upload_in_rows(search_rows, filename, expected_size, size_tolerance=tol)
+        if found:
+            if on_log:
+                on_log(f"[Filester] verify: matched {filename!r} via account file search")
+            return found
+        if search_rows and not rows:
+            rows = search_rows
+    except requests.RequestException as exc:
+        if on_log:
+            on_log(f"[Filester] verify: account search failed: {exc}")
     if on_log:
-        names = [
-            str(r.get("name") or "")
-            for r in rows
-            if isinstance(r, dict) and str(r.get("name") or "") == filename
+        same_name = [
+            r for r in rows
+            if isinstance(r, dict) and str(r.get("name") or "").lower() == filename.lower()
         ]
-        if names:
-            sizes = [
-                int(r.get("size") or 0)
-                for r in rows
-                if isinstance(r, dict) and str(r.get("name") or "") == filename
-            ]
+        if same_name:
+            sizes = [int(r.get("size") or 0) for r in same_name]
             on_log(
-                f"[Filester] verify: {filename!r} in folder but size mismatch "
-                f"(want {expected_size:,} bytes, saw {sizes!r})"
+                f"[Filester] verify: {filename!r} name match but size mismatch "
+                f"(want {expected_size:,}±{tol:,} B, remote {sizes!r})"
             )
         else:
             on_log(
                 f"[Filester] verify: {filename!r} not in folder yet "
-                f"({len(rows)} file(s) listed)"
+                f"({len(rows)} listed: {_summarize_folder_rows(rows)})"
             )
     return None
 
@@ -743,8 +820,8 @@ def _wait_for_upload_response(
     poll = FILESTER_UPLOAD_VERIFY_POLL_SEC
     verify_after = FILESTER_UPLOAD_VERIFY_AFTER_SEC
     max_verify = FILESTER_UPLOAD_VERIFY_MAX_SEC
-    last_send_log = [0.0]
     verify_wait_logged = [False]
+    sending_logged = [False]
 
     while not done.wait(timeout=poll):
         _check_upload_abort(should_cancel, should_restart)
@@ -753,9 +830,9 @@ def _wait_for_upload_response(
         sent_at = bytes_sent_at[0]
         now = time.time()
         if sent_at is None:
-            if on_log and now - last_send_log[0] >= poll:
-                last_send_log[0] = now
-                on_log(f"[Filester] {filename}: still sending upload bytes…")
+            if on_log and not sending_logged[0]:
+                sending_logged[0] = True
+                on_log(f"[Filester] {filename}: sending upload bytes…")
             continue
         elapsed = now - sent_at
         if elapsed < verify_after:

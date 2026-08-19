@@ -1664,7 +1664,7 @@ def _append_job_log(job_id, line):
 
 
 def _append_hasher_log(job_id, line):
-    _append_thumber_log(job_id, f"[hasher] {line}")
+    _append_job_log(job_id, f"[hasher] {line}")
 
 
 def _make_hasher_stream_progress_callback(job_id: str, algorithm: str):
