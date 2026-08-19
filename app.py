@@ -347,12 +347,23 @@ def _filester_split_stashdb_apply_worker(job_id: str) -> None:
     if not dest or not scene_title:
         return
     log_fn = lambda ln: _append_job_log(job_id, ln)
+    log_fn("[Filester] stashdb apply: background worker started")
+    t0 = time.monotonic()
+    log_fn("[Filester] stashdb apply: acquiring folder lock…")
     with _filester_split_folder_lock(job_id):
+        log_fn(
+            f"[Filester] stashdb apply: lock acquired after {time.monotonic() - t0:.1f}s"
+        )
+        t_apply = time.monotonic()
         apply_stashdb_to_split_folder(
             dest,
             scene_title,
             job.get("stashdb_cover_path"),
             on_log=log_fn,
+        )
+        log_fn(
+            f"[Filester] stashdb apply: finished in {time.monotonic() - t_apply:.1f}s "
+            f"(total {time.monotonic() - t0:.1f}s)"
         )
 
 
@@ -368,6 +379,7 @@ def _schedule_filester_split_stashdb_apply(job_id: str) -> None:
     existing = job.get("_filester_stashdb_apply_thread")
     if existing is not None and existing.is_alive():
         return
+    _append_job_log(job_id, "[Filester] stashdb apply: scheduling background worker")
     t = threading.Thread(
         target=_filester_split_stashdb_apply_worker,
         args=(job_id,),

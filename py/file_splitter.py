@@ -1045,6 +1045,11 @@ def iter_upload_parts_sliced(
         est_probe_size = int((first_end - trial_starts[0]) * bytes_per_sec * _PROBE_SIZE_MARGIN)
         probe_skip_threshold = int(max_bytes * _PROBE_SKIP_ESTIMATE_RATIO)
         if est_probe_size > probe_skip_threshold:
+            if on_log:
+                on_log(
+                    f"[split] probe slice starting (est {est_probe_size:,} bytes)…"
+                )
+            t_probe = time.monotonic()
             _extract_single_segment(
                 path,
                 probe_path,
@@ -1058,6 +1063,11 @@ def iter_upload_parts_sliced(
                 should_cancel=should_cancel,
             )
             probe_size = os.path.getsize(probe_path)
+            if on_log:
+                on_log(
+                    f"[split] probe slice done in {time.monotonic() - t_probe:.1f}s "
+                    f"({probe_size:,} bytes)"
+                )
             try:
                 os.remove(probe_path)
             except OSError:
@@ -1128,6 +1138,7 @@ def iter_upload_parts_sliced(
                 continue
         if on_log:
             on_log(f"Splitting part {part_no}/{num_parts}: {part_name}")
+        t_extract = time.monotonic()
         _extract_single_segment(
             path,
             part_path,
@@ -1141,6 +1152,11 @@ def iter_upload_parts_sliced(
             should_cancel=should_cancel,
         )
         part_size = os.path.getsize(part_path)
+        if on_log:
+            on_log(
+                f"[split] part {part_no}/{num_parts}: ffmpeg done in "
+                f"{time.monotonic() - t_extract:.1f}s ({part_size:,} bytes)"
+            )
         if part_size > max_bytes:
             try:
                 os.remove(part_path)
@@ -1161,6 +1177,8 @@ def iter_upload_parts_sliced(
             "original_basename": original,
             "split_mode": "ffmpeg_slice",
         }
+        if on_log:
+            on_log(f"[split] part {part_no}/{num_parts}: yielded to upload loop")
 
     if delete_source and not skip_part_indices:
         try:

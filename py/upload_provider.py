@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import time
 import uuid
 from contextlib import nullcontext
 
@@ -17,7 +18,7 @@ import file_splitter
 import filester_upload
 import gofile_upload
 import size_limits
-from upload_common import UploadResult, format_size  # noqa: F401 (re-exported)
+from upload_common import UploadResult, PhaseTimer, format_size  # noqa: F401 (re-exported)
 from upload_resume import (
     UploadResumeState,
     UploadedPart,
@@ -174,14 +175,36 @@ class SplitUploadCoordinator:
     def ensure_split_folder(self) -> str | None:
         """Create a filename-stem subfolder before any parts upload."""
         lock = self._folder_lock() if self._folder_lock else nullcontext()
+        if self._on_log:
+            self._on_log("[Filester] ensure_split_folder: acquiring folder lock…")
+        lock_wait = time.monotonic()
         with lock:
+            if self._on_log:
+                waited = time.monotonic() - lock_wait
+                if waited >= 0.05:
+                    self._on_log(
+                        f"[Filester] ensure_split_folder: lock acquired after {waited:.1f}s"
+                    )
+                else:
+                    self._on_log("[Filester] ensure_split_folder: lock acquired")
             self.sync_from_job()
             if self._dest_folder_id:
                 dest = self._dest_folder_id
+                if self._on_log:
+                    self._on_log(
+                        f"[Filester] ensure_split_folder: reusing existing dest "
+                        f"{dest[:12]}…"
+                    )
             elif not self.studio_folder_id:
                 return None
             else:
                 label = f"split upload: {self.fallback_name}"
+                if self._on_log:
+                    self._on_log(
+                        f"[Filester] ensure_split_folder: creating "
+                        f'"{self.fallback_name}" under studio folder…'
+                    )
+                t_create = time.monotonic()
                 try:
                     dest = filester_upload.create_split_upload_folder(
                         parent_folder_id=self.studio_folder_id,
@@ -190,6 +213,11 @@ class SplitUploadCoordinator:
                         on_log=self._on_log,
                     )
                     self._save_dest(dest)
+                    if self._on_log:
+                        self._on_log(
+                            f"[Filester] ensure_split_folder: created in "
+                            f"{time.monotonic() - t_create:.1f}s"
+                        )
                 except Exception as exc:  # noqa: BLE001
                     self.sync_from_job()
                     if self._dest_folder_id:
@@ -201,7 +229,7 @@ class SplitUploadCoordinator:
                     else:
                         if self._on_log:
                             self._on_log(
-                                f"[Filester] Split folder create failed "
+                                f"[Filester] Scene folder create failed "
                                 f"(upload continues in studio folder): {exc}"
                             )
                         return None
@@ -530,8 +558,12 @@ def _upload_filester_parts(
         resume_dir=resume_dir,
         on_log=on_log,
     )
+    phase = PhaseTimer(on_log)
+    phase.log("split upload pipeline starting")
     if upload_folder_id:
+        phase.log("ensuring stem-named split folder")
         split_coord.ensure_split_folder()
+        phase.log("split folder ready")
     if upload_folder_id and on_log:
         on_log(
             "[Filester] Split upload: stem-named subfolder for all parts; "
@@ -554,6 +586,7 @@ def _upload_filester_parts(
         on_log(f"[Filester] Split upload needs ~{need_gb:.1f} GiB free disk")
         if split_progress is not None:
             split_progress.set_splitting(source_bytes=size)
+        phase.log(f"splitter ready ({split_mode}); waiting for first part from iterator")
 
     def _skip_check():
         if should_cancel and should_cancel():
@@ -562,6 +595,7 @@ def _upload_filester_parts(
     def _on_parts_planned(count: int) -> None:
         resume_state.total_parts = count
         resume_state.was_split = count > 1
+        phase.log(f"splitter planned {count} part(s)")
         if resume_dir:
             save_upload_resume_state(resume_dir, resume_state)
 
@@ -616,7 +650,15 @@ def _upload_filester_parts(
             last_part = part
             part_count = int(part.get("part_count") or 1)
             part_index = int(part.get("part_index") or 0)
+            reused = bool(part.get("reused_existing"))
+            phase.log(
+                f"part iterator yielded {part_index}/{part_count}: "
+                f"{part.get('filename') or os.path.basename(part_path)} "
+                f"({format_size(int(part.get('size_bytes') or 0))}"
+                f"{', reused' if reused else ''})"
+            )
             if part_index in skip_part_indices:
+                phase.log(f"part {part_index}/{part_count}: skipped (already on Filester)")
                 continue
             target_folder_id = split_coord.upload_folder_for_part(part_index)
             if split_progress is not None and part_count > 1 and part_index > 0:
@@ -632,13 +674,14 @@ def _upload_filester_parts(
                     if target_folder_id and target_folder_id != upload_folder_id
                     else "studio folder"
                 )
-                on_log(
-                    f"[Filester] Uploading part {part_index}/{part_count}: "
-                    f"{part['filename']} ({format_size(part['size_bytes'])}) → {dest_hint}"
+                phase.log(
+                    f"part {part_index}/{part_count}: upload starting → {dest_hint} "
+                    f"(folder {str(target_folder_id or '')[:12]}…)"
                 )
             part_on_progress = on_progress
             if split_progress is not None and part_count > 1 and part_index > 0:
                 part_on_progress = split_progress.wrap_part(part_index)
+            t_upload = time.monotonic()
             raw = _upload_filester_file(
                 part_path,
                 folder_id=target_folder_id,
@@ -647,9 +690,14 @@ def _upload_filester_parts(
                 should_restart=should_restart,
                 on_log=on_log,
             )
+            phase.log(
+                f"part {part_index}/{part_count}: upload returned "
+                f"({time.monotonic() - t_upload:.1f}s)"
+            )
             result = _normalize_filester(raw, part=part)
             if split_progress is not None and part_count > 1 and part_index > 0:
                 split_progress.complete_part(part_index)
+                phase.log(f"part {part_index}/{part_count}: progress marked complete")
             split_coord.after_part_uploaded(part_index, raw)
             slug = filester_upload.file_identifier_from_response(raw)
             if resume_dir and result.ok and slug:
@@ -664,17 +712,24 @@ def _upload_filester_parts(
                     resume_state.was_split = part_count > 1
                     resume_state.total_parts = part_count
                     save_upload_resume_state(resume_dir, resume_state)
+                    phase.log(f"part {part_index}/{part_count}: resume state saved")
             results.append(result)
             if not part.get("is_source"):
                 try:
                     os.remove(part_path)
-                except OSError:
-                    pass
+                    phase.log(f"part {part_index}/{part_count}: local part file deleted")
+                except OSError as exc:
+                    phase.log(
+                        f"part {part_index}/{part_count}: local part delete failed: {exc}"
+                    )
+            phase.log(f"part {part_index}/{part_count}: done; waiting for next part from splitter")
 
         upload_complete = bool(last_part) and (
             not resume_state.total_parts
             or len(resume_state.parts) >= int(resume_state.total_parts or 0)
         )
+        if upload_complete:
+            phase.log("all parts uploaded")
 
         if on_log and last_part and last_part.get("part_count", 1) > 1 and upload_complete:
             stem, ext = os.path.splitext(

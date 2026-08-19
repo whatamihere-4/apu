@@ -617,16 +617,33 @@ def find_uploaded_file_in_folder(
         return None
     tol = _verify_size_tolerance(expected_size) if size_tolerance is None else size_tolerance
     rows: list[dict] = []
+    t0 = time.monotonic()
     try:
         rows = list_folder_files(fid)
+        if on_log:
+            on_log(
+                f"[Filester] verify: folder list {len(rows)} file(s) in "
+                f"{time.monotonic() - t0:.1f}s"
+            )
         found = _find_upload_in_rows(rows, filename, expected_size, size_tolerance=tol)
         if found:
+            if on_log:
+                on_log(f"[Filester] verify: matched {filename!r} via folder listing")
             return found
     except requests.RequestException as exc:
         if on_log:
-            on_log(f"[Filester] verify: folder listing failed for {fid[:12]}…: {exc}")
+            on_log(
+                f"[Filester] verify: folder listing failed after "
+                f"{time.monotonic() - t0:.1f}s for {fid[:12]}…: {exc}"
+            )
     try:
+        t_search = time.monotonic()
         search_rows = search_account_files(folder_id=fid, search=filename, per_page=50)
+        if on_log:
+            on_log(
+                f"[Filester] verify: account search returned {len(search_rows)} row(s) in "
+                f"{time.monotonic() - t_search:.1f}s"
+            )
         found = _find_upload_in_rows(search_rows, filename, expected_size, size_tolerance=tol)
         if found:
             if on_log:
@@ -700,6 +717,12 @@ def _upload_post_once(
     url = f"{FILESTER_BASE_URL}/api/v1/upload"
     last_log = [0.0]
     start_time = [time.time()]
+    if on_log:
+        dest = (folder_id or "").strip() or "root"
+        on_log(
+            f"[Filester] {filename}: opening upload POST "
+            f"({format_size(filesize)} → folder {dest[:12]}…)"
+        )
 
     def progress_callback(monitor):
         _check_upload_abort(should_cancel, should_restart)
@@ -744,12 +767,25 @@ def _upload_post_once(
         headers["Content-Type"] = monitor.content_type
         if folder_id:
             headers["X-Folder-ID"] = folder_id
-        return requests.post(
+        t_post = time.time()
+        resp = requests.post(
             url,
             data=monitor,
             headers=headers,
             timeout=(30, None),
         )
+        if on_log:
+            post_elapsed = time.time() - t_post
+            ack_after_bytes = ""
+            if bytes_sent_at is not None and bytes_sent_at[0] is not None:
+                ack_after_bytes = (
+                    f", {time.time() - bytes_sent_at[0]:.1f}s after bytes sent"
+                )
+            on_log(
+                f"[Filester] {filename}: upload POST returned HTTP {resp.status_code} "
+                f"in {post_elapsed:.1f}s{ack_after_bytes}"
+            )
+        return resp
 
 
 def _wait_for_upload_response(
@@ -813,7 +849,10 @@ def _wait_for_upload_response(
             done.set()
 
     thread = threading.Thread(target=worker, name=f"filester-upload-{filename}", daemon=True)
+    worker_started = time.monotonic()
     thread.start()
+    if on_log:
+        on_log(f"[Filester] {filename}: upload worker thread started")
 
     poll = FILESTER_UPLOAD_VERIFY_POLL_SEC
     verify_after = FILESTER_UPLOAD_VERIFY_AFTER_SEC
@@ -871,6 +910,17 @@ def _wait_for_upload_response(
 
     if error_box:
         raise error_box["error"]
+    if on_log:
+        worker_elapsed = time.monotonic() - worker_started
+        if bytes_sent_at[0]:
+            on_log(
+                f"[Filester] {filename}: upload worker finished in {worker_elapsed:.1f}s "
+                f"({time.time() - bytes_sent_at[0]:.1f}s after bytes sent)"
+            )
+        else:
+            on_log(
+                f"[Filester] {filename}: upload worker finished in {worker_elapsed:.1f}s"
+            )
     return response_box["response"]
 
 
@@ -897,8 +947,11 @@ def upload_file(
     )
 
     last_err = None
+    upload_started = time.monotonic()
     for attempt in range(1, 4):
         _check_upload_abort(should_cancel, should_restart)
+        if on_log:
+            on_log(f"[Filester] {filename}: upload attempt {attempt}/3 starting")
         try:
             r = _wait_for_upload_response(
                 filepath,
@@ -926,6 +979,12 @@ def upload_file(
                     continue
                 r.raise_for_status()
                 result = r.json()
+            if on_log:
+                verified = " (folder verify)" if isinstance(r, dict) and r.get("verified_via_folder_listing") else ""
+                on_log(
+                    f"[Filester] {filename}: upload attempt {attempt} ok in "
+                    f"{time.monotonic() - upload_started:.1f}s{verified}"
+                )
             break
         except UploadRestartRequested:
             raise
@@ -1157,6 +1216,9 @@ def try_rename_folder(
         ("POST", f"{FILESTER_BASE_URL}/api/v1/folder", {"identifier": fid, "name": name}),
     ]
     last_err: Exception | None = None
+    if on_log:
+        on_log(f'[Filester] try_rename_folder: "{name}" on {fid[:12]}…')
+    t0 = time.monotonic()
     for method, url, payload in attempts:
         try:
             r = requests.request(
@@ -1169,6 +1231,11 @@ def try_rename_folder(
             if r.status_code in (200, 201, 204):
                 data = r.json() if r.content else {}
                 if not data or data.get("success", True) is not False:
+                    if on_log:
+                        on_log(
+                            f"[Filester] try_rename_folder: succeeded via {method} "
+                            f"in {time.monotonic() - t0:.1f}s"
+                        )
                     return True
             r.raise_for_status()
         except Exception as exc:  # noqa: BLE001
@@ -1201,10 +1268,22 @@ def apply_stashdb_to_split_folder(
     display = sanitize_folder_name(title)
     if renamed and on_log:
         on_log(f'[Filester] Renamed split folder to "{display}" ({folder_url(fid)})')
+    elif on_log:
+        on_log(f'[Filester] Split folder rename skipped or failed for "{display}"')
 
     cover = Path(cover_image_path) if cover_image_path else None
     if cover and cover.is_file():
+        if on_log:
+            on_log(f"[Filester] Setting split folder thumbnail from {cover.name}…")
+        t_thumb = time.monotonic()
         try_set_split_folder_thumbnail(fid, cover, on_log=on_log)
+        if on_log:
+            on_log(
+                f"[Filester] Split folder thumbnail step finished in "
+                f"{time.monotonic() - t_thumb:.1f}s"
+            )
+    elif on_log and cover_image_path:
+        on_log("[Filester] Split folder thumbnail skipped (cover file missing)")
     return renamed
 
 
