@@ -20,10 +20,10 @@ from upload_common import UploadResult, format_size  # noqa: F401 (re-exported)
 from upload_resume import (
     UploadResumeState,
     UploadedPart,
+    cleanup_split_artifacts,
     load_upload_resume_state,
     resume_job_dir,
     save_upload_resume_state,
-    delete_upload_resume_state,
 )
 
 
@@ -303,6 +303,7 @@ def _upload_filester_parts(
     delete_source: bool,
     resume_dir: str | None = None,
     resume_state: UploadResumeState | None = None,
+    preserve_split_artifacts: bool = False,
 ) -> tuple[list[UploadResult], str | None]:
     from downloader import TransferCancelled
 
@@ -429,6 +430,7 @@ def _upload_filester_parts(
             should_cancel=should_cancel,
             delete_source=delete_source and not skip_part_indices,
             ffmpeg_timeout=FILESTER_FFMPEG_TIMEOUT,
+            **split_kwargs,
         )
     elif split_mode == "ffmpeg_slice":
         part_source = file_splitter.iter_upload_parts_sliced(
@@ -543,12 +545,10 @@ def _upload_filester_parts(
                     f"Windows: copy /b {original}.part001+...+{original}"
                 )
     finally:
-        if resume_dir:
-            if upload_complete:
-                shutil.rmtree(out_dir, ignore_errors=True)
-                delete_upload_resume_state(resume_dir)
-        else:
+        if upload_complete or not preserve_split_artifacts:
             shutil.rmtree(out_dir, ignore_errors=True)
+            if resume_dir:
+                shutil.rmtree(resume_dir, ignore_errors=True)
 
     return results, upload_folder_id
 
@@ -564,6 +564,7 @@ def upload_source(
     delete_source_after_upload: bool = False,
     resume_dir: str | None = None,
     resume_state: UploadResumeState | None = None,
+    preserve_split_artifacts: bool = False,
 ) -> tuple[list[UploadResult], str | None, str | None]:
     """Upload a file or directory to all enabled/feasible providers.
 
@@ -628,6 +629,7 @@ def upload_source(
                 delete_source=delete_source_after_upload and not gofile_ran,
                 resume_dir=resume_dir,
                 resume_state=resume_state,
+                preserve_split_artifacts=preserve_split_artifacts,
             )
             src_results.extend(fs_results)
             if effective_fs_folder:

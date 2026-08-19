@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 
 from upload_resume import (
     UploadedPart,
     UploadResumeState,
+    cleanup_split_artifacts,
     delete_upload_resume_state,
     load_upload_resume_state,
     save_upload_resume_state,
@@ -53,6 +55,25 @@ class UploadResumeStateTests(unittest.TestCase):
         save_upload_resume_state(self.job_dir, UploadResumeState())
         delete_upload_resume_state(self.job_dir)
         self.assertIsNone(load_upload_resume_state(self.job_dir))
+
+    def test_cleanup_split_artifacts(self) -> None:
+        source = f"{self._tmp.name}/movie.mp4"
+        with open(source, "wb") as f:
+            f.write(b"x")
+        split_dir = f"{self._tmp.name}/.split_job-1"
+        os.makedirs(split_dir)
+        with open(f"{split_dir}/movie.PART1.mp4", "wb") as f:
+            f.write(b"part")
+        with open(f"{self._tmp.name}/movie.part001", "wb") as f:
+            f.write(b"byte")
+        save_upload_resume_state(self.job_dir, UploadResumeState())
+
+        cleanup_split_artifacts(source, "job-1", resume_dir=self.job_dir)
+
+        self.assertTrue(os.path.isfile(source))
+        self.assertFalse(os.path.isdir(split_dir))
+        self.assertFalse(os.path.isfile(f"{self._tmp.name}/movie.part001"))
+        self.assertFalse(os.path.isdir(self.job_dir))
 
 
 if __name__ == "__main__":

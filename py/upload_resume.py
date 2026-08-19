@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -140,6 +141,38 @@ def delete_upload_resume_state(job_dir: str) -> None:
         os.remove(path)
     except OSError:
         pass
+
+
+def cleanup_split_artifacts(
+    source_path: str | None,
+    job_id: str | None = None,
+    *,
+    resume_dir: str | None = None,
+) -> None:
+    """Remove local split workdirs and resume metadata for a finished/abandoned job."""
+    if source_path:
+        parent = os.path.dirname(source_path) or "."
+        token = (job_id or "").strip()
+        if token:
+            shutil.rmtree(os.path.join(parent, f".split_{token}"), ignore_errors=True)
+        base = os.path.basename(source_path)
+        stem, ext = os.path.splitext(base)
+        try:
+            for name in os.listdir(parent):
+                if name.startswith(f"{stem}.part"):
+                    try:
+                        os.remove(os.path.join(parent, name))
+                    except OSError:
+                        pass
+                elif ext and name.startswith(f"{stem}.PART") and name.endswith(ext):
+                    try:
+                        os.remove(os.path.join(parent, name))
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+    if resume_dir:
+        shutil.rmtree(resume_dir, ignore_errors=True)
 
 
 INTERRUPTED_JOB_FILE = "interrupted_upload.json"

@@ -52,6 +52,7 @@ from gif_host import gif_encode_limits, resolved_gif_host
 from queue_persist import track_add, track_remove
 from queue_api import register_queue_routes
 from upload_resume import (
+    cleanup_split_artifacts,
     delete_upload_resume_state,
     load_interrupted_job,
     clear_interrupted_job,
@@ -6583,6 +6584,7 @@ def _start_link_job(url, folder_id=None, *, job_id=None, resume_upload=False):
                     job_id=job_id,
                     delete_source_after_upload=True,
                     resume_dir=resume_dir,
+                    preserve_split_artifacts=resume_upload,
                 )
             finally:
                 if is_video:
@@ -6620,6 +6622,11 @@ def _start_link_job(url, folder_id=None, *, job_id=None, resume_upload=False):
                 jobs[job_id]["error"] = str(e)
                 jobs[job_id]["progress"] = None
                 print(f"[ERROR] Job {job_id}: {e}", flush=True)
+                cleanup_split_artifacts(
+                    downloaded_path or jobs[job_id].get("source_path"),
+                    job_id,
+                    resume_dir=resume_dir,
+                )
             if downloaded_path and os.path.exists(downloaded_path):
                 if _is_video_file(downloaded_path):
                     _join_parallel_upload_sidecars(job_id, timeout=30.0)
@@ -6759,6 +6766,7 @@ def _start_path_job(path, folder_id=None, *, job_id=None, resume_upload=False):
                     on_log=lambda ln: _append_job_log(job_id, ln),
                     job_id=job_id,
                     resume_dir=resume_dir,
+                    preserve_split_artifacts=resume_upload,
                 )
             finally:
                 if is_vid_file:
@@ -6787,6 +6795,7 @@ def _start_path_job(path, folder_id=None, *, job_id=None, resume_upload=False):
                 jobs[job_id]["error"] = str(e)
                 jobs[job_id]["progress"] = None
                 print(f"[ERROR] Job {job_id}: {e}", flush=True)
+                cleanup_split_artifacts(path, job_id, resume_dir=resume_dir)
             if os.path.isfile(path) and _is_video_file(path):
                 _join_parallel_upload_sidecars(job_id, timeout=25.0)
 

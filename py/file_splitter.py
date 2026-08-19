@@ -703,6 +703,9 @@ def iter_upload_parts(
     should_cancel=None,
     delete_source: bool = True,
     ffmpeg_timeout: int = 7200,
+    skip_part_indices: frozenset[int] = frozenset(),
+    reuse_existing_parts: bool = False,
+    on_parts_planned=None,
 ):
     """Yield part dicts compatible with byte_splitter (ffmpeg PART naming).
 
@@ -723,17 +726,37 @@ def iter_upload_parts(
         }
         return
 
-    parts = split_file(
-        path,
-        max_bytes,
-        output_dir,
-        on_log=on_log,
-        should_cancel=should_cancel,
-        ffmpeg_timeout=ffmpeg_timeout,
-    )
     original = os.path.basename(path)
+    stem, ext = os.path.splitext(original)
+    os.makedirs(output_dir, exist_ok=True)
+
+    parts: list[str] | None = None
+    if reuse_existing_parts:
+        existing = _part_paths(output_dir, stem, ext)
+        if existing:
+            if on_log:
+                on_log(
+                    f"Reusing {len(existing)} existing ffmpeg part(s) from {output_dir}"
+                )
+            parts = existing
+
+    if parts is None:
+        parts = split_file(
+            path,
+            max_bytes,
+            output_dir,
+            on_log=on_log,
+            should_cancel=should_cancel,
+            ffmpeg_timeout=ffmpeg_timeout,
+        )
+
     part_count = len(parts)
+    if on_parts_planned:
+        on_parts_planned(part_count)
+
     for idx, part_path in enumerate(parts, start=1):
+        if idx in skip_part_indices:
+            continue
         yield {
             "path": part_path,
             "filename": os.path.basename(part_path),
