@@ -1100,6 +1100,114 @@ def delete_empty_folder(folder_id: str, *, on_log=None) -> bool:
     return True
 
 
+def create_split_upload_folder(
+    *,
+    parent_folder_id: str,
+    folder_name: str,
+    blacklist_label: str = "",
+    on_log=None,
+) -> str:
+    """Create a stem-named subfolder for a split upload (all parts land here)."""
+    parent = (parent_folder_id or "").strip()
+    title = sanitize_folder_name((folder_name or "").strip() or "upload")
+    if not parent or not title:
+        return parent
+
+    dest_folder_id = create_folder(parent, title)
+    record_upload_subfolder(
+        dest_folder_id,
+        label=blacklist_label or f"split upload: {title}",
+    )
+    if on_log:
+        on_log(
+            f'[Filester] Created split folder "{title}" ({folder_url(dest_folder_id)})'
+        )
+    return dest_folder_id
+
+
+def try_rename_folder(
+    folder_id: str,
+    new_name: str,
+    *,
+    on_log=None,
+) -> bool:
+    """Best-effort folder rename; returns True when the API accepts the change."""
+    fid = (folder_id or "").strip()
+    name = sanitize_folder_name((new_name or "").strip())
+    if not fid or not name:
+        return False
+
+    row = find_folder_row(fid)
+    if row and sanitize_folder_name(str(row.get("name") or "")) == name:
+        return True
+
+    attempts: list[tuple[str, str, dict]] = [
+        (
+            "PATCH",
+            f"{FILESTER_BASE_URL}/api/v1/folder/{urllib.parse.quote(fid, safe='')}",
+            {"name": name},
+        ),
+        (
+            "PUT",
+            f"{FILESTER_BASE_URL}/api/v1/folder/{urllib.parse.quote(fid, safe='')}",
+            {"name": name},
+        ),
+        ("POST", f"{FILESTER_BASE_URL}/api/v1/folder/update", {"identifier": fid, "name": name}),
+        ("POST", f"{FILESTER_BASE_URL}/api/v1/folder/rename", {"identifier": fid, "name": name}),
+        ("POST", f"{FILESTER_BASE_URL}/api/v1/folder", {"identifier": fid, "name": name}),
+    ]
+    last_err: Exception | None = None
+    for method, url, payload in attempts:
+        try:
+            r = requests.request(
+                method,
+                url,
+                headers=_auth_headers(),
+                json=payload,
+                timeout=60,
+            )
+            if r.status_code in (200, 201, 204):
+                data = r.json() if r.content else {}
+                if not data or data.get("success", True) is not False:
+                    return True
+            r.raise_for_status()
+        except Exception as exc:  # noqa: BLE001
+            last_err = exc
+            continue
+
+    if on_log:
+        hint = f": {last_err}" if last_err else ""
+        on_log(
+            f'[Filester] Folder rename to "{name}" failed{hint}; '
+            f"rename manually in the web UI ({folder_url(fid)})"
+        )
+    return False
+
+
+def apply_stashdb_to_split_folder(
+    folder_id: str,
+    scene_title: str,
+    cover_image_path: str | Path | None = None,
+    *,
+    on_log=None,
+) -> bool:
+    """Rename a split-upload folder to the StashDB scene title and set its thumbnail."""
+    fid = (folder_id or "").strip()
+    title = (scene_title or "").strip()
+    if not fid or not title:
+        return False
+
+    renamed = try_rename_folder(fid, title, on_log=on_log)
+    display = sanitize_folder_name(title)
+    if renamed and on_log:
+        on_log(f'[Filester] Renamed split folder to "{display}" ({folder_url(fid)})')
+
+    cover = Path(cover_image_path) if cover_image_path else None
+    if cover and cover.is_file():
+        try_set_split_folder_thumbnail(fid, cover, on_log=on_log)
+    return renamed
+
+
 def prepare_split_scene_folder(
     *,
     parent_folder_id: str,
@@ -1112,19 +1220,16 @@ def prepare_split_scene_folder(
     """Create a split-upload scene subfolder and optionally set its thumbnail."""
     parent = (parent_folder_id or "").strip()
     display_name = (folder_title or folder_name or "").strip() or folder_name
-    title = sanitize_folder_name(display_name)
-    if not parent or not title:
+    if not parent or not display_name:
         return parent
 
-    dest_folder_id = create_folder(parent, title)
-    record_upload_subfolder(
-        dest_folder_id,
-        label=blacklist_label or f"split upload: {title}",
+    dest_folder_id = create_split_upload_folder(
+        parent_folder_id=parent,
+        folder_name=display_name,
+        blacklist_label=blacklist_label or f"split upload: {sanitize_folder_name(display_name)}",
+        on_log=on_log,
     )
-    if on_log:
-        on_log(
-            f'[Filester] Created split scene folder "{title}" ({folder_url(dest_folder_id)})'
-        )
+    title = sanitize_folder_name(display_name)
 
     cover = Path(cover_image_path) if cover_image_path else None
     if cover and cover.is_file():
@@ -1265,12 +1370,16 @@ def rename_split_upload_folder_for_stashdb(
     on_log=None,
     temp_folder_id: str | None = None,
 ) -> str:
-    """Create a StashDB-titled folder and move split parts into it.
-
-    ``temp_folder_id`` is ignored (legacy): parts upload flat into the studio
-    folder and are organized here — no temp folder to delete.
-    """
-    _ = temp_folder_id
+    """Rename an existing split folder for StashDB, or organize parts as a fallback."""
+    fid = (temp_folder_id or "").strip()
+    if fid:
+        apply_stashdb_to_split_folder(
+            fid,
+            scene_title,
+            cover_image_path,
+            on_log=on_log,
+        )
+        return fid
     title = sanitize_folder_name(scene_title)
     return organize_split_parts_into_folder(
         parent_folder_id=parent_folder_id,

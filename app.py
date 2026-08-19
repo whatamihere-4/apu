@@ -45,9 +45,9 @@ from upload_progress import UploadProgressReporter
 from downloader import download_file, TransferCancelled
 from filester_upload import (
     apply_folder_blacklist,
+    apply_stashdb_to_split_folder,
     fetch_folder_map_from_api,
     organize_split_parts_into_folder,
-    prepare_split_scene_folder,
     try_set_split_folder_thumbnail,
 )
 from oshash_remote import fetch_oshash_from_url
@@ -348,40 +348,33 @@ def _filester_split_folder_lock(job_id: str) -> threading.Lock:
 
 
 def _maybe_prepare_filester_split_folder(job_id: str) -> None:
-    """When StashDB matches during an in-flight split upload, create the scene folder early."""
+    """When StashDB matches during a split upload, rename the stem folder if it exists."""
     job = jobs.get(job_id)
     if not job or not job.get("filester_split_active"):
         return
     if job.get("status") != "uploading":
         return
-    studio = (job.get("filester_folder_id") or "").strip()
-    if not studio or (job.get("filester_split_dest_folder_id") or "").strip():
+    dest = (job.get("filester_split_dest_folder_id") or "").strip()
+    if not dest:
         return
     match = job.get("stashdb_match") or {}
     scene_title = (match.get("title") or "").strip()
     if not scene_title:
         return
-    source = (job.get("source_filename") or "upload").strip()
-    stem, _ext = os.path.splitext(source)
     log_fn = lambda ln: _append_job_log(job_id, ln)
     with _filester_split_folder_lock(job_id):
         job = jobs.get(job_id)
-        if not job or (job.get("filester_split_dest_folder_id") or "").strip():
+        if not job:
             return
-        try:
-            dest = prepare_split_scene_folder(
-                parent_folder_id=studio,
-                folder_name=stem or "upload",
-                folder_title=scene_title,
-                cover_image_path=job.get("stashdb_cover_path"),
-                blacklist_label=f"split upload: {scene_title} (StashDB)",
-                on_log=log_fn,
-            )
-            job["filester_split_dest_folder_id"] = dest
-        except Exception as exc:  # noqa: BLE001
-            log_fn(
-                f"[Filester] Early scene folder create failed (will retry after part 1): {exc}"
-            )
+        dest = (job.get("filester_split_dest_folder_id") or "").strip()
+        if not dest:
+            return
+        apply_stashdb_to_split_folder(
+            dest,
+            scene_title,
+            job.get("stashdb_cover_path"),
+            on_log=log_fn,
+        )
 
 
 def _load_filester_folders():
@@ -6322,12 +6315,22 @@ def _finalize_upload(
         progressive_dest = (job.get("filester_split_dest_folder_id") or "").strip()
         if progressive_dest:
             effective_filester_folder = progressive_dest
+            match = job.get("stashdb_match") or {}
+            scene_title = (match.get("title") or "").strip()
             cover_path = job.get("stashdb_cover_path")
-            if cover_path:
+            log_fn = lambda ln: _append_job_log(job_id, ln)
+            if scene_title:
+                apply_stashdb_to_split_folder(
+                    progressive_dest,
+                    scene_title,
+                    cover_path,
+                    on_log=log_fn,
+                )
+            elif cover_path:
                 try_set_split_folder_thumbnail(
                     progressive_dest,
                     cover_path,
-                    on_log=lambda ln: _append_job_log(job_id, ln),
+                    on_log=log_fn,
                 )
         else:
             studio_folder_id = (job.get("filester_folder_id") or "").strip()
