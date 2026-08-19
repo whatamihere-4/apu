@@ -4,14 +4,14 @@ HTTP API for the Stash-compatible hasher service.
 
 Endpoints:
   GET  /health, /v1/health
-  POST /v1/hash          { filename, algorithm }   — OSHASH | MD5 | PHASH (single JSON response)
+  POST /v1/hash          { filename, algorithm }   — OSHASH | PHASH (single JSON response)
   POST /v1/hash_stream   { filename, algorithm } — chunked NDJSON: progress/phase lines, then ``{"type":"result",...}``
 
 Single-shot /v1/hash returns JSON, e.g. for OSHASH:
   { "ok": true, "filename": "...", "algorithm": "OSHASH",
     "hash": "abcdef0123456789", "duration_int": 562 }
 
-OSHASH/MD5 are pure file I/O so they finish in seconds even on large files.
+OSHASH is pure file I/O so it finishes in seconds even on large files.
 PHASH shells out to the official Stash `phasher` binary (ffmpeg-based, slow).
 The hasher image applies a small patch so phasher prints
 ``STASH_PHASH_PROGRESS <n> <total>`` to stderr after each sprite tile (25 total);
@@ -23,7 +23,6 @@ which is the same shared mount used by apu and thumber.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -45,26 +44,20 @@ LISTEN_PORT = int(os.environ.get("HASHER_HTTP_PORT", "8089"))
 AUTH_TOKEN = os.environ.get("HASHER_HTTP_TOKEN", "").strip()
 BODY_MAX = int(os.environ.get("HASHER_HTTP_BODY_MAX", "8192"))
 PHASH_TIMEOUT = int(os.environ.get("HASHER_PHASH_TIMEOUT_SEC", "1800"))
-MD5_CHUNK = int(os.environ.get("HASHER_MD5_CHUNK_BYTES", str(4 * 1024 * 1024)))
 VERBOSE = os.environ.get("HASHER_HTTP_VERBOSE", "").strip().lower() in (
     "1", "true", "yes", "on",
 )
 
 # While phasher runs (no per-frame API from upstream), emit heartbeat events this often.
 PHASHER_HEARTBEAT_SEC = float(os.environ.get("HASHER_PHASHER_HEARTBEAT_SEC", "1.0"))
-# MD5 progress: emit at least every N bytes read (plus on completion).
-MD5_PROGRESS_BYTES = max(
-    1,
-    int(os.environ.get("HASHER_MD5_PROGRESS_BYTES", str(8 * 1024 * 1024))),
-)
 
 OSHASH_CHUNK = 65536  # Stash uses 64KB head + 64KB tail (OpenSubtitles hash)
 PHASH_HEX_RE = re.compile(r"^[0-9a-fA-F]{16}$")
 PHASH_PROG_RE = re.compile(r"^STASH_PHASH_PROGRESS\s+(\d+)\s+(\d+)\s*$")
-ALGORITHMS = ("OSHASH", "MD5", "PHASH")
+ALGORITHMS = ("OSHASH", "PHASH")
 
 # PHASH and ffprobe are CPU-heavy; serialize them so a small VPS stays responsive.
-# OSHASH/MD5 are file-I/O bound and run unlocked.
+# OSHASH is file-I/O bound and runs unlocked.
 _phash_lock = threading.Lock()
 
 
@@ -221,44 +214,6 @@ def _compute_oshash(path: str, emit=None) -> str:
     return f"{h:016x}"
 
 
-def _compute_md5(path: str, emit=None) -> str:
-    size = os.path.getsize(path)
-    h = hashlib.md5()
-    read = 0
-    next_emit_at = 0
-    with open(path, "rb") as f:
-        while True:
-            buf = f.read(MD5_CHUNK)
-            if not buf:
-                break
-            h.update(buf)
-            read += len(buf)
-            if emit and read >= next_emit_at:
-                pct = round((read / size) * 100.0, 2) if size > 0 else None
-                emit(
-                    {
-                        "type": "progress",
-                        "algorithm": "MD5",
-                        "read_bytes": read,
-                        "total_bytes": size,
-                        "pct": pct,
-                    }
-                )
-                next_emit_at = read + MD5_PROGRESS_BYTES
-    if emit:
-        emit(
-            {
-                "type": "progress",
-                "algorithm": "MD5",
-                "read_bytes": read,
-                "total_bytes": size,
-                "pct": 100.0 if size > 0 else None,
-                "phase": "complete",
-            }
-        )
-    return h.hexdigest()
-
-
 def _compute_phash(path: str, emit=None) -> tuple[str | None, int, str]:
     """Return (hex_hash_or_none, exit_code, combined_logs).
 
@@ -391,28 +346,6 @@ def _hash_for(filename: str, algorithm: str) -> dict[str, Any]:
             "ok": True,
             "filename": filename,
             "algorithm": "OSHASH",
-            "hash": h,
-            "duration": duration,
-            "duration_int": int(duration) if duration is not None else None,
-            "width": width,
-            "height": height,
-        }
-
-    if algorithm == "MD5":
-        try:
-            h = _compute_md5(full_path)
-        except OSError as e:
-            return {
-                "ok": False,
-                "error": "md5_failed",
-                "detail": str(e),
-                "filename": filename,
-                "algorithm": algorithm,
-            }
-        return {
-            "ok": True,
-            "filename": filename,
-            "algorithm": "MD5",
             "hash": h,
             "duration": duration,
             "duration_int": int(duration) if duration is not None else None,
@@ -566,38 +499,6 @@ def _stream_hash(handler: BaseHTTPRequestHandler, filename: str, algorithm: str)
             )
             return
 
-        if algorithm == "MD5":
-            try:
-                h = _compute_md5(full_path, emit=emit)
-            except OSError as e:
-                _emit_chunked_obj(
-                    handler,
-                    {
-                        "type": "result",
-                        "ok": False,
-                        "error": "md5_failed",
-                        "detail": str(e),
-                        "filename": filename,
-                        "algorithm": algorithm,
-                    },
-                )
-                return
-            _emit_chunked_obj(
-                handler,
-                {
-                    "type": "result",
-                    "ok": True,
-                    "filename": filename,
-                    "algorithm": "MD5",
-                    "hash": h,
-                    "duration": duration,
-                    "duration_int": int(duration) if duration is not None else None,
-                    "width": width,
-                    "height": height,
-                },
-            )
-            return
-
         if algorithm == "PHASH":
             emit({"type": "phase", "phase": "waiting_for_phash_slot", "algorithm": "PHASH"})
             if not _phash_lock.acquire(blocking=False):
@@ -706,7 +607,6 @@ def _stream_hash(handler: BaseHTTPRequestHandler, filename: str, algorithm: str)
 _PATH_TO_ALGO = {
     "/v1/hash": None,    # algorithm comes from body
     "/v1/oshash": "OSHASH",
-    "/v1/md5": "MD5",
     "/v1/phash": "PHASH",
 }
 

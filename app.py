@@ -170,7 +170,7 @@ VIDEO_EXTENSIONS = {
 }
 STASHDB_API_KEY = (os.environ.get("STASHDB_API_KEY") or "").strip()
 STASHDB_GRAPHQL_URL = (os.environ.get("STASHDB_GRAPHQL_URL") or "https://stashdb.org/graphql").strip()
-# hasher-http sidecar: computes OSHASH / MD5 / PHASH via /v1/hash. Aliases of the
+# hasher-http sidecar: computes OSHASH / PHASH via /v1/hash. Aliases of the
 # old PHASHER_* env names are still accepted to preserve existing deploys.
 HASHER_HTTP_URL = (
     os.environ.get("HASHER_HTTP_URL")
@@ -190,11 +190,10 @@ HASHER_HTTP_TIMEOUT = _env_int(
 HASHER_ENABLED = _env_yes("HASHER_ENABLED", default="1")
 # Per-algorithm (only if HASHER_ENABLED and HASHER_HTTP_URL are both on).
 HASHER_OSHASH_ENABLED = _env_yes("HASHER_OSHASH_ENABLED", default="1")
-HASHER_MD5_ENABLED = _env_yes("HASHER_MD5_ENABLED", default="1")
 HASHER_PHASH_ENABLED = _env_yes("HASHER_PHASH_ENABLED", default="1")
-# When 1, only compute PHASH after a StashDB match when neither OSHASH nor MD5 matched.
-# The upload check already short-circuits OSHASH → MD5 → PHASH; this also skips the
-# post-match PHASH follow-up (submitFingerprint) when the match came from OSHASH/MD5.
+# When 1, only compute PHASH after a StashDB match when OSHASH did not match.
+# The upload check already short-circuits OSHASH → PHASH; this also skips the
+# post-match PHASH follow-up (submitFingerprint) when the match came from OSHASH.
 HASHER_PHASH_ONLY_ON_MISS = _env_yes("HASHER_PHASH_ONLY_ON_MISS", default="0")
 STASHDB_DRAFTS_BASE = (os.environ.get("STASHDB_DRAFTS_BASE") or "https://stashdb.org/drafts").rstrip("/")
 STASHDB_SCENES_BASE = (os.environ.get("STASHDB_SCENES_BASE") or "https://stashdb.org/scenes").rstrip("/")
@@ -229,7 +228,7 @@ PIXHOST_API_URL = (os.environ.get("PIXHOST_API_URL") or "https://api.pixhost.cc"
 GIF_HOST = resolved_gif_host()
 GIF_ENCODE_LIMITS = gif_encode_limits(GIF_HOST)
 JOB_LINKS_FILENAME_ONLY = _env_yes("JOB_LINKS_FILENAME_ONLY", default="0")
-HASHER_ALGORITHMS = ("OSHASH", "MD5", "PHASH")
+HASHER_ALGORITHMS = ("OSHASH", "PHASH")
 
 
 def _hasher_sidecar_configured() -> bool:
@@ -247,15 +246,13 @@ def _hasher_algo_enabled(algo: str) -> bool:
     a = (algo or "").strip().upper()
     if a == "OSHASH":
         return HASHER_OSHASH_ENABLED
-    if a == "MD5":
-        return HASHER_MD5_ENABLED
     if a == "PHASH":
         return HASHER_PHASH_ENABLED
     return False
 
 
 def _helper_stashdb_lookup_algos() -> tuple[str, ...]:
-    return tuple(x for x in ("OSHASH", "MD5", "PHASH") if _hasher_algo_enabled(x))
+    return tuple(x for x in ("OSHASH", "PHASH") if _hasher_algo_enabled(x))
 
 
 jobs = {}
@@ -1070,11 +1067,11 @@ def _gofile_root_id_optional() -> str | None:
 #       "size_bytes": int,        # for staleness check
 #       "duration_int": int|null, # ffprobe duration, kept once any algo computes it
 #       "computed_at": "ISO-8601",
-#       "oshash": "...", "md5": "...", "phash": "...",   # any subset present
+#       "oshash": "...", "phash": "...",   # any subset present
 #       "video_width": int|null, "video_height": int|null,  # ffprobe v:0 (hasher-http)
 #       "stashdb": {                                     # optional: most recent match / link
 #           "scene_id": "...", "edit_id": "...", "draft_id": "...",  # any subset
-#           "matched_by": "OSHASH"|"MD5"|"PHASH"|"AUTOFILL"|"EDIT"|"DRAFT"|"MANUAL",
+#           "matched_by": "OSHASH"|"PHASH"|"AUTOFILL"|"EDIT"|"DRAFT"|"MANUAL",
 #           "checked_at": "ISO-8601",
 #           "contributed": ["OSHASH:<hash>", ...]        # submitFingerprint successes (idempotency)
 #       }
@@ -1831,11 +1828,6 @@ def oshash_page():
     return render_template("oshash.html")
 
 
-@app.route("/md5")
-def md5_page():
-    return render_template("md5.html")
-
-
 @app.route("/phash")
 def phash_page():
     return render_template(
@@ -1865,10 +1857,6 @@ def api_scenes_cache_update():
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     fields = {}
-    if data.get("md5"):
-        m = re.sub(r"[^a-fA-F0-9]", "", str(data["md5"])).lower()
-        if len(m) == 32:
-            fields["md5"] = m
     if data.get("oshash"):
         o = re.sub(r"[^a-fA-F0-9]", "", str(data["oshash"]).lower())
         if len(o) == 16:
@@ -2001,20 +1989,9 @@ def api_phash_from_url():
         _maybe_delete_remote_download(dl_path)
 
 
-def _generate_url_fingerprint_job_ndjson(url: str, md5_opt: str = ""):
-    """NDJSON stream: download progress, hasher events (PHASH/OSHASH), StashDB, ``done``.
-
-    ``md5_opt``: optional 32-char hex MD5 (remote-hashes flow); merged into cache and lookup order.
-    """
-    md5_opt = (md5_opt or "").strip()
-    md5_opt = re.sub(r"[^a-fA-F0-9]", "", md5_opt).lower() if md5_opt else ""
-    if md5_opt and len(md5_opt) != 32:
-        yield json.dumps(
-            {"type": "error", "ok": False, "error": "optional md5 must be 32 hex chars"},
-            ensure_ascii=False,
-        ) + "\n"
-        return
-    yield json.dumps({"type": "phase", "phase": "start", "url": url, "md5": md5_opt or None}, ensure_ascii=False) + "\n"
+def _generate_url_fingerprint_job_ndjson(url: str):
+    """NDJSON stream: download progress, hasher events (PHASH/OSHASH), StashDB, ``done``."""
+    yield json.dumps({"type": "phase", "phase": "start", "url": url}, ensure_ascii=False) + "\n"
     dl_path: str | None = None
     try:
         yield json.dumps({"type": "phase", "phase": "remote_oshash"}) + "\n"
@@ -2154,8 +2131,6 @@ def _generate_url_fingerprint_job_ndjson(url: str, md5_opt: str = ""):
             "phash": phash_hex,
             "duration_int": dur_int,
         }
-        if md5_opt:
-            cache_fields["md5"] = md5_opt
         if body.get("width") is not None:
             cache_fields["video_width"] = body.get("width")
         if body.get("height") is not None:
@@ -2168,7 +2143,6 @@ def _generate_url_fingerprint_job_ndjson(url: str, md5_opt: str = ""):
             "hash": phash_hex,
             "phash": phash_hex,
             "oshash": osh_hash,
-            "md5": md5_opt or None,
             "cache_filename": cache_name,
             "size_bytes": size_b,
             "final_url": osh_remote.get("final_url") if osh_remote.get("ok") else None,
@@ -2182,18 +2156,12 @@ def _generate_url_fingerprint_job_ndjson(url: str, md5_opt: str = ""):
         if STASHDB_API_KEY:
             try:
                 ordered = [("OSHASH", osh_hash), ("PHASH", phash_hex)]
-                if md5_opt:
-                    ordered.append(("MD5", md5_opt))
                 raw_scene, hit_algo = _stashdb_lookup_scene_ordered(ordered)
                 if raw_scene:
                     payload["stashdb_match"] = _scene_fragment_to_match(raw_scene)
                     payload["stashdb_hit_by"] = hit_algo
                     if payload.get("duration_int") is None:
-                        h_for_dur = (
-                            osh_hash if hit_algo == "OSHASH" else (
-                                phash_hex if hit_algo == "PHASH" else md5_opt
-                            )
-                        )
+                        h_for_dur = osh_hash if hit_algo == "OSHASH" else phash_hex
                         dsec, dint, det = _stashdb_duration_fallback_from_fingerprint(
                             raw_scene, hit_algo, h_for_dur or ""
                         )
@@ -2247,12 +2215,8 @@ def api_remote_scenes_from_url_stream():
         return jsonify({"ok": False, "error": "Hasher is not configured"}), 503
     if not _hasher_algo_enabled("PHASH"):
         return jsonify({"ok": False, "error": "PHASH is disabled (HASHER_PHASH_ENABLED)"}), 403
-    md5_opt = (data.get("md5") or "").strip()
-    md5_norm = re.sub(r"[^a-fA-F0-9]", "", md5_opt).lower() if md5_opt else ""
-    if md5_norm and len(md5_norm) != 32:
-        return jsonify({"ok": False, "error": "optional md5 must be 32 hex chars"}), 400
     return Response(
-        stream_with_context(_generate_url_fingerprint_job_ndjson(url, md5_opt)),
+        stream_with_context(_generate_url_fingerprint_job_ndjson(url)),
         mimetype="application/x-ndjson",
     )
 
@@ -2313,7 +2277,7 @@ def api_hasher_hash_stream():
 
 @app.route("/api/remote_scenes_from_url", methods=["POST"])
 def api_remote_scenes_from_url():
-    """Remote OSHASH (Range) + full download + PHASH; optional MD5 paste; StashDB; hashes.json."""
+    """Remote OSHASH (Range) + full download + PHASH; StashDB; hashes.json."""
     data = request.get_json(silent=True) or {}
     url = (data.get("url") or "").strip()
     if not url:
@@ -2322,11 +2286,6 @@ def api_remote_scenes_from_url():
         return jsonify({"ok": False, "error": "Hasher is not configured"}), 503
     if not _hasher_algo_enabled("PHASH"):
         return jsonify({"ok": False, "error": "PHASH is disabled (HASHER_PHASH_ENABLED)"}), 403
-
-    md5_opt = (data.get("md5") or "").strip()
-    md5_opt = re.sub(r"[^a-fA-F0-9]", "", md5_opt).lower() if md5_opt else ""
-    if md5_opt and len(md5_opt) != 32:
-        return jsonify({"ok": False, "error": "optional md5 must be 32 hex chars"}), 400
 
     osh_remote = fetch_oshash_from_url(url)
     dl_path: str | None = None
@@ -2373,8 +2332,6 @@ def api_remote_scenes_from_url():
             "phash": phash_hex,
             "duration_int": dur_int,
         }
-        if md5_opt:
-            cache_fields["md5"] = md5_opt
         if ph_body.get("width") is not None:
             cache_fields["video_width"] = ph_body.get("width")
         if ph_body.get("height") is not None:
@@ -2382,15 +2339,12 @@ def api_remote_scenes_from_url():
         _scenes_set(cache_name, **{k: v for k, v in cache_fields.items() if v is not None})
 
         ordered = [("OSHASH", osh_hash), ("PHASH", phash_hex)]
-        if md5_opt:
-            ordered.append(("MD5", md5_opt))
 
         payload: dict = {
             "ok": True,
             "url": url,
             "oshash": osh_hash,
             "phash": phash_hex,
-            "md5": md5_opt or None,
             "cache_filename": cache_name,
             "size_bytes": size_b,
             "final_url": osh_remote.get("final_url") if osh_remote.get("ok") else None,
@@ -2408,9 +2362,7 @@ def api_remote_scenes_from_url():
                     payload["stashdb_match"] = _scene_fragment_to_match(raw_scene)
                     payload["stashdb_hit_by"] = hit_algo
                     if payload.get("duration_int") is None:
-                        h_for_dur = osh_hash if hit_algo == "OSHASH" else (
-                            phash_hex if hit_algo == "PHASH" else md5_opt
-                        )
+                        h_for_dur = osh_hash if hit_algo == "OSHASH" else phash_hex
                         dsec, dint, det = _stashdb_duration_fallback_from_fingerprint(
                             raw_scene, hit_algo, h_for_dur or ""
                         )
@@ -2433,40 +2385,6 @@ def api_remote_scenes_from_url():
         return jsonify({"ok": False, "error": str(e)}), 500
     finally:
         _maybe_delete_remote_download(dl_path)
-
-
-@app.route("/api/md5_stashdb_lookup", methods=["POST"])
-def api_md5_stashdb_lookup():
-    """Normalize MD5 hex and run read-only StashDB findScenesBySceneFingerprints (no submit)."""
-    data = request.get_json(silent=True) or {}
-    raw = (data.get("md5") or "").strip().lower()
-    raw = re.sub(r"[^a-f0-9]", "", raw)
-    if len(raw) != 32:
-        return jsonify({"ok": False, "error": "md5 must be 32 hexadecimal characters"}), 400
-
-    payload: dict = {"ok": True, "hash": raw}
-    if not STASHDB_API_KEY:
-        payload["stashdb_skipped"] = "STASHDB_API_KEY is not set"
-        payload["stashdb_can_submit"] = bool(STASHDB_API_KEY and STASHDB_AUTO_CONTRIBUTE)
-        return jsonify(payload)
-
-    try:
-        matches = _stashdb_find_by_fingerprints([{"algorithm": "MD5", "hash": raw}])
-        if matches:
-            raw_scene = matches[0]
-            payload["stashdb_match"] = _scene_fragment_to_match(raw_scene)
-            dsec, dint, det = _stashdb_duration_fallback_from_fingerprint(raw_scene, "MD5", raw)
-            if dint is not None:
-                payload["duration"] = dsec
-                payload["duration_int"] = dint
-                payload["duration_detail"] = det
-        else:
-            payload["stashdb_match"] = None
-    except Exception as e:  # noqa: BLE001
-        payload["stashdb_error"] = str(e)
-
-    payload["stashdb_can_submit"] = bool(STASHDB_API_KEY and STASHDB_AUTO_CONTRIBUTE)
-    return jsonify(payload)
 
 
 @app.route("/api/oshash_from_url", methods=["POST"])
@@ -2524,10 +2442,10 @@ def api_stashdb_submit_scene_fingerprints():
     """Attach fingerprints to an existing scene (stash-box submitFingerprint).
 
     Intended for hashes computed outside the local file pipeline (e.g. remote
-    OSHASH via HTTP Range, or MD5 pasted from GoFile / other tools).
+    OSHASH via HTTP Range).
 
     Body: scene_id (uuid), duration (seconds, int >= 0),
-           fingerprints: [{ "algorithm": "OSHASH"|"MD5"|"PHASH", "hash": "..." }, ...]
+           fingerprints: [{ "algorithm": "OSHASH"|"PHASH", "hash": "..." }, ...]
 
     Requires STASHDB_API_KEY and STASHDB_AUTO_CONTRIBUTE enabled.
     """
@@ -2558,13 +2476,9 @@ def api_stashdb_submit_scene_fingerprints():
             continue
         algo = (fp.get("algorithm") or "").strip().upper()
         h = (fp.get("hash") or "").strip()
-        if algo == "MD5":
+        if algo in ("OSHASH", "PHASH"):
             h = re.sub(r"[^a-fA-F0-9]", "", h).lower()
-        elif algo in ("OSHASH", "PHASH"):
-            h = re.sub(r"[^a-fA-F0-9]", "", h).lower()
-        if algo not in ("OSHASH", "MD5", "PHASH") or not h:
-            continue
-        if algo == "MD5" and len(h) != 32:
+        if algo not in ("OSHASH", "PHASH") or not h:
             continue
         if algo in ("OSHASH", "PHASH") and len(h) != 16:
             continue
@@ -2572,7 +2486,7 @@ def api_stashdb_submit_scene_fingerprints():
 
     if not pairs:
         return jsonify({
-            "error": "Provide fingerprints: [{algorithm: OSHASH|MD5|PHASH, hash}]",
+            "error": "Provide fingerprints: [{algorithm: OSHASH|PHASH, hash}]",
         }), 400
 
     results = []
@@ -2588,9 +2502,9 @@ def api_stashdb_submit_scene_fingerprints():
 
 @app.route("/api/stashdb_contribute_matched_scene", methods=["POST"])
 def api_stashdb_contribute_matched_scene():
-    """After a StashDB match, compute missing hashes (esp. MD5) and submit fingerprints.
+    """After a StashDB match, compute missing hashes and submit fingerprints.
 
-    Body: filename (under /downloads), scene_id (uuid), matched_algo (OSHASH|MD5|PHASH),
+    Body: filename (under /downloads), scene_id (uuid), matched_algo (OSHASH|PHASH),
           optional fingerprints: [{algorithm, hash}, ...], optional duration_int.
     """
     if not STASHDB_API_KEY:
@@ -3548,7 +3462,7 @@ def _hasher_base_url() -> str:
 
 
 def _hasher_call(filename, algorithm, on_event=None):
-    """Run one OSHASH | MD5 | PHASH against the hasher-http sidecar.
+    """Run one OSHASH | PHASH against the hasher-http sidecar.
 
     When ``on_event`` is set, uses ``/v1/hash_stream`` (NDJSON) and invokes
     ``on_event(dict)`` for each event; returns the final result body (without
@@ -3695,8 +3609,8 @@ def _hash_via_sidecar(name, algorithm, on_hasher_event=None):
 
 @app.route("/api/stashdb_video_hash", methods=["POST"])
 def api_stashdb_video_hash():
-    """Generic hash endpoint. Body: { filename, algorithm: OSHASH|MD5|PHASH }.
-    OSHASH/MD5 typically finish in under a few seconds; PHASH is the slow one."""
+    """Generic hash endpoint. Body: { filename, algorithm: OSHASH|PHASH }.
+    OSHASH typically finishes in under a few seconds; PHASH is the slow one."""
     data = request.get_json(silent=True) or {}
     raw = data.get("filename") or ""
     try:
@@ -4082,12 +3996,11 @@ def api_stashdb_auto_submit():
     """End-to-end pipeline:
 
       1. Compute OSHASH  → query StashDB; if match, stop (no draft).
-      2. Compute MD5     → query StashDB; if match, stop (no draft).
-      3. Compute PHASH   → query StashDB; if match, stop (no draft).  (skip with skip_phash=true)
-      4. Optional URL/title overlap check                              (skip with skip_url_check=true)
-      5. Submit draft with all collected fingerprints (needs duration; needs title).
+      2. Compute PHASH   → query StashDB; if match, stop (no draft).  (skip with skip_phash=true)
+      3. Optional URL/title overlap check                              (skip with skip_url_check=true)
+      4. Submit draft with all collected fingerprints (needs duration; needs title).
 
-    The point: OSHASH and MD5 are essentially free vs PHASH (single-digit seconds vs
+    The point: OSHASH is essentially free vs PHASH (single-digit seconds vs
     20-30 seconds), and *most* files in a batch are already on StashDB. This short-circuits
     the slow PHASH step on the common case while still falling back to it for novel files.
 
@@ -4147,7 +4060,7 @@ def api_stashdb_auto_submit():
     duration_int = None
 
     algorithms = []
-    for a in ("OSHASH", "MD5", "PHASH"):
+    for a in ("OSHASH", "PHASH"):
         if not _hasher_algo_enabled(a):
             continue
         if a == "PHASH" and skip_phash:
@@ -4420,10 +4333,7 @@ def _normalize_stashdb_fingerprint_hash(algorithm: str, hash_value: str) -> tupl
     """Return (ALGO, normalized_hash) or None if invalid."""
     algo = (algorithm or "").strip().upper()
     h = re.sub(r"[^a-fA-F0-9]", "", str(hash_value or "")).lower()
-    if algo == "MD5":
-        if len(h) != 32:
-            return None
-    elif algo in ("OSHASH", "PHASH"):
+    if algo in ("OSHASH", "PHASH"):
         if len(h) != 16:
             return None
     else:
@@ -4480,9 +4390,8 @@ def _ensure_entry_media_and_hashes(
     entry: dict,
     *,
     matched_algo: str | None = None,
-    compute_md5: bool = True,
 ) -> None:
-    """Fill duration and/or MD5 in ``entry`` when missing (mutates in place)."""
+    """Fill duration in ``entry`` when missing (mutates in place)."""
     log = lambda msg: _append_hasher_log(job_id, msg) if job_id else None
 
     needs_probe = (
@@ -4506,27 +4415,6 @@ def _ensure_entry_media_and_hashes(
         except Exception as e:  # noqa: BLE001
             if log:
                 log(f"media probe skipped: {e}")
-
-    if (
-        compute_md5
-        and matched_algo
-        and not entry.get("md5")
-        and _hasher_algo_enabled("MD5")
-    ):
-        try:
-            if log:
-                log("computing MD5 for StashDB contribute")
-            body = _hash_via_sidecar(filename, "MD5")
-            hm = body.get("hash")
-            if hm:
-                entry["md5"] = hm
-                if entry.get("duration_int") is None and body.get("duration_int") is not None:
-                    entry["duration_int"] = body.get("duration_int")
-                if log:
-                    log("MD5 cached for contribute")
-        except Exception as e:  # noqa: BLE001
-            if log:
-                log(f"MD5 compute for contribute failed: {e}")
 
 
 def _contribute_fingerprints_for_matched_file(
@@ -4556,16 +4444,16 @@ def _contribute_fingerprints_for_matched_file(
         if isinstance(fp, dict) and fp.get("algorithm") and fp.get("hash"):
             entry[str(fp["algorithm"]).lower()] = fp["hash"]
     cached = _scenes_get(filename, expected_size=size) or {}
-    for key in ("oshash", "md5", "phash", "duration_int", "video_width", "video_height"):
+    for key in ("oshash", "phash", "duration_int", "video_width", "video_height"):
         if entry.get(key) is None and cached.get(key) is not None:
             entry[key] = cached[key]
 
     _ensure_entry_media_and_hashes(
-        job_id, filename, entry, matched_algo=matched_algo, compute_md5=True,
+        job_id, filename, entry, matched_algo=matched_algo,
     )
     _scenes_set(filename, **{
         k: v for k, v in entry.items()
-        if k in ("size_bytes", "duration_int", "oshash", "md5", "phash",
+        if k in ("size_bytes", "duration_int", "oshash", "phash",
                  "video_width", "video_height")
     })
     fragment, ui = _stashdb_contribute_after_match(
@@ -4750,7 +4638,7 @@ def _stashdb_phash_followup(job_id, downloaded_path):
         return
     if HASHER_PHASH_ONLY_ON_MISS:
         matched_by = (mp.get("matched_by") or "").strip().upper()
-        if matched_by in ("OSHASH", "MD5"):
+        if matched_by == "OSHASH":
             _stashdb_contribute_merge_delta(
                 job_id,
                 message_suffix=(
@@ -4800,7 +4688,7 @@ def _stashdb_phash_followup(job_id, downloaded_path):
                     entry["video_height"] = body.get("height")
                 _scenes_set(filename, **{
                     k: v for k, v in entry.items()
-                    if k in ("size_bytes", "duration_int", "oshash", "md5", "phash",
+                    if k in ("size_bytes", "duration_int", "oshash", "phash",
                              "video_width", "video_height")
                 })
                 entry = _scenes_get(filename, expected_size=size) or entry
@@ -4901,7 +4789,7 @@ def _stashdb_phash_followup(job_id, downloaded_path):
 
 
 def _stashdb_post_upload_check(job_id, downloaded_path, *, parallel_with_upload: bool = False):
-    """OSHASH → MD5 → PHASH short-circuit lookup against StashDB.
+    """OSHASH → PHASH short-circuit lookup against StashDB.
 
     Uses the local hash cache (size-keyed) so files we've already seen don't
     pay the compute cost again. Sets the helper-URL fields on the job and
@@ -4941,7 +4829,7 @@ def _stashdb_post_upload_check(job_id, downloaded_path, *, parallel_with_upload:
     cached = _scenes_get(filename, expected_size=size) or {}
     entry = {"size_bytes": size}
     entry.update({k: v for k, v in cached.items() if k in
-                  ("oshash", "md5", "phash", "duration_int",
+                  ("oshash", "phash", "duration_int",
                    "video_width", "video_height")})
 
     # Cached hashes may lack ffprobe duration/dimensions. One cheap OSHASH call
@@ -4964,7 +4852,7 @@ def _stashdb_post_upload_check(job_id, downloaded_path, *, parallel_with_upload:
                 entry["duration_int"] = dim_body.get("duration_int")
             _scenes_set(filename, **{
                 k: v for k, v in entry.items()
-                if k in ("size_bytes", "duration_int", "oshash", "md5", "phash",
+                if k in ("size_bytes", "duration_int", "oshash", "phash",
                          "video_width", "video_height")
             })
         except Exception as e:  # noqa: BLE001
@@ -5003,7 +4891,7 @@ def _stashdb_post_upload_check(job_id, downloaded_path, *, parallel_with_upload:
                 # Persist after every successful compute so partial progress survives.
                 _scenes_set(filename, **{
                     k: v for k, v in entry.items()
-                    if k in ("size_bytes", "duration_int", "oshash", "md5", "phash",
+                    if k in ("size_bytes", "duration_int", "oshash", "phash",
                              "video_width", "video_height")
                 })
             else:
@@ -5038,13 +4926,13 @@ def _stashdb_post_upload_check(job_id, downloaded_path, *, parallel_with_upload:
 
     if matched_scene and matched_algo:
         _ensure_entry_media_and_hashes(
-            job_id, filename, entry, matched_algo=matched_algo, compute_md5=True,
+            job_id, filename, entry, matched_algo=matched_algo,
         )
 
     # Whatever we computed, flush the latest into the cache.
     _scenes_set(filename, **{
         k: v for k, v in entry.items()
-        if k in ("size_bytes", "duration_int", "oshash", "md5", "phash",
+        if k in ("size_bytes", "duration_int", "oshash", "phash",
                  "video_width", "video_height")
     })
 
@@ -5098,7 +4986,7 @@ def _stashdb_post_upload_check(job_id, downloaded_path, *, parallel_with_upload:
         job["stashdb_helper_url"] = f"/stashdb-scene-draft?filename={quoted}"
         _append_hasher_log(job_id, "done: no match; draft helper set")
         if not job.get("stashdb_check_error"):
-            print(f"[STASHDB] {filename!r} no match (OSHASH/MD5/PHASH all clean)", flush=True)
+            print(f"[STASHDB] {filename!r} no match (OSHASH/PHASH all clean)", flush=True)
 
     return _scenes_get(filename)
 

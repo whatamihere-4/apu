@@ -81,8 +81,6 @@
     .row-item { padding: 0.85rem 0; border-top: 1px solid var(--border); }
     .row-item:first-child { border-top: none; padding-top: 0; }
     .row-item-title { font-size: 0.78rem; color: var(--muted); margin-bottom: 0.5rem; word-break: break-all; }
-    .md5-row { margin-top: 0.65rem; display: grid; grid-template-columns: 1fr auto; gap: 0.5rem; align-items: end; }
-    .md5-row label { grid-column: 1 / -1; }
     .batch-toolbar {
       margin-bottom: 1rem;
       padding-bottom: 1rem;
@@ -97,7 +95,7 @@
 </head>
 <body>
   <h1>Remote hashes (OSHASH + PHASH)</h1>
-  <p class="subtitle">For each URL: <strong>OSHASH</strong> via HTTP Range when possible, full download for <strong>PHASH</strong>, optional <strong>MD5</strong> you paste (merged into <code>cache/scenes.json</code>). Use <strong>Apply MD5 &amp; re-check</strong> after entering MD5 to query StashDB again. <strong>Submit all</strong> only processes rows that already matched StashDB.</p>
+  <p class="subtitle">For each URL: <strong>OSHASH</strong> via HTTP Range when possible, full download for <strong>PHASH</strong> (merged into <code>cache/scenes.json</code>). <strong>Submit all</strong> only processes rows that already matched StashDB.</p>
 
   <div class="card">
     <label for="urls">Video file URL(s)</label>
@@ -109,7 +107,7 @@
     <div id="result"></div>
   </div>
 
-  <p class="muted"><a href="/phash">Remote PHASH</a> · <a href="/oshash">Remote OSHASH</a> · <a href="/md5">MD5 → StashDB</a> · <a href="/">← Back to apu</a></p>
+  <p class="muted"><a href="/phash">Remote PHASH</a> · <a href="/oshash">Remote OSHASH</a> · <a href="/">← Back to apu</a></p>
 
   <script>
     const resultEl = document.getElementById('result');
@@ -150,17 +148,12 @@
         return s;
       }
       if (ev.type === 'phase') return String(ev.phase || '').replace(/_/g, ' ');
-      if (ev.type === 'progress' && ev.algorithm === 'MD5') {
-        const p = ev.pct != null ? Number(ev.pct).toFixed(1) + '%' : '';
-        return 'MD5 ' + p + ' (' + (ev.read_bytes || 0) + ' / ' + (ev.total_bytes || 0) + ' B)';
-      }
       return '';
     }
 
-    async function consumeRemoteHashesStream(url, md5Optional, onStatus) {
+    async function consumeRemoteHashesStream(url, onStatus) {
       const body = { url };
-      if (md5Optional && String(md5Optional).length === 32) body.md5 = md5Optional;
-      const r = await fetch('/api/remote_hashes_from_url/stream', {
+      const r = await fetch('/api/remote_scenes_from_url/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -216,18 +209,12 @@
       return String(s || '').replace(/[^a-fA-F0-9]/g, '').toLowerCase();
     }
 
-    function normHex32(s) {
-      return String(s || '').replace(/[^a-fA-F0-9]/g, '').toLowerCase();
-    }
-
     function fingerprintsFromRemoteData(data) {
       const fps = [];
       const o = normHex16(data.oshash);
       const p = normHex16(data.phash);
-      const m = normHex32(data.md5);
       if (o.length === 16) fps.push({ algorithm: 'OSHASH', hash: o });
       if (p.length === 16) fps.push({ algorithm: 'PHASH', hash: p });
-      if (m.length === 32) fps.push({ algorithm: 'MD5', hash: m });
       return fps;
     }
 
@@ -238,10 +225,8 @@
         + '&source_url=' + encodeURIComponent(url);
       const o = normHex16(data.oshash);
       const p = normHex16(data.phash);
-      const m = normHex32(data.md5);
       if (o.length === 16) h += '&oshash=' + encodeURIComponent(o);
       if (p.length === 16) h += '&phash=' + encodeURIComponent(p);
-      if (m.length === 32) h += '&md5=' + encodeURIComponent(m);
       if (durVal !== '') h += '&duration_int=' + encodeURIComponent(durVal);
       return h;
     }
@@ -257,7 +242,6 @@
     function buildRowInner(url, data, idx) {
       const durVal = durValFromData(data);
       const durAttr = durVal !== '' ? ' value="' + escapeHtml(durVal) + '"' : '';
-      const md5Val = data.md5 ? escapeHtml(data.md5) : '';
       let html = '';
       html += '<div class="row-item-title">#' + (idx + 1) + ' — <span class="hash">' + escapeHtml(url) + '</span></div>';
       html += '<div><strong>OSHASH</strong></div><div class="hash">' + escapeHtml(data.oshash || '—') + '</div>';
@@ -265,12 +249,6 @@
       if (data.cache_filename) {
         html += '<div class="muted" style="margin-top:0.45rem;">Cache file: <span class="hash">' + escapeHtml(data.cache_filename) + '</span></div>';
       }
-      html += '<div class="md5-row">';
-      html += '<label for="md5-in-' + idx + '">MD5 (optional)</label>';
-      html += '<input type="text" id="md5-in-' + idx + '" placeholder="32 hex chars" autocomplete="off" spellcheck="false" value="' + md5Val + '">';
-      html += '<button type="button" class="btn inline" id="md5-apply-' + idx + '">Apply MD5 &amp; re-check</button>';
-      html += '</div>';
-      html += '<div id="md5-msg-' + idx + '" class="muted" style="margin-top:0.35rem;"></div>';
       html += '<div class="muted" style="margin-top:0.5rem;">Size: ' + (data.size_bytes != null ? data.size_bytes.toLocaleString() : '—') + ' bytes</div>';
       if (data.final_url) {
         html += '<div class="muted">Resolved: <span class="hash">' + escapeHtml(data.final_url) + '</span></div>';
@@ -312,12 +290,12 @@
         html += '<div id="submit-msg-' + idx + '" class="muted" style="margin-top:0.5rem;"></div>';
       } else {
         if (data.stashdb_match === null && !data.stashdb_skipped && !data.stashdb_error) {
-          html += '<div class="muted" style="margin-top:0.75rem;">StashDB: no scene with these fingerprints (OSHASH, PHASH, optional MD5).</div>';
+          html += '<div class="muted" style="margin-top:0.75rem;">StashDB: no scene with these fingerprints (OSHASH, PHASH).</div>';
         }
         const canSubmitMan = !!data.stashdb_can_submit;
         html += '<hr style="margin:1rem 0;border:none;border-top:1px solid var(--border);">';
         html += '<div><strong>Know the scene on StashDB?</strong></div>';
-        html += '<div class="muted" style="margin-top:0.35rem;">Paste the scene URL to attach OSHASH, PHASH, and MD5 (if set) as fingerprints.</div>';
+        html += '<div class="muted" style="margin-top:0.35rem;">Paste the scene URL to attach OSHASH and PHASH as fingerprints.</div>';
         html += '<label for="manual-scene-url-' + idx + '" style="margin-top:0.65rem;">StashDB scene URL</label>';
         html += '<input type="text" id="manual-scene-url-' + idx + '" placeholder="https://stashdb.org/scenes/…" autocomplete="off">';
         html += '<div class="dur-row" style="margin-top:0.65rem;">';
@@ -332,7 +310,7 @@
         if (data.stashdb_match === null && !data.stashdb_skipped && !data.stashdb_error) {
           const draftHref = draftHrefRemoteBundle(url, data);
           html += '<div class="actions" style="margin-top:0.85rem;"><a class="btn secondary" href="' + escapeHtml(draftHref) + '" style="display:inline-block;margin-top:0;text-decoration:none;">Create StashDB draft…</a></div>';
-          html += '<div class="muted" style="margin-top:0.45rem;">Draft opens with cached filename, hashes, source URL, and optional MD5 prefilled.</div>';
+          html += '<div class="muted" style="margin-top:0.45rem;">Draft opens with cached filename, hashes, and source URL prefilled.</div>';
         }
       }
       if (data.stashdb_skipped) {
@@ -400,8 +378,6 @@
         if (sure && br.data.stashdb_match) sure.addEventListener('click', () => onSubmitSureIdx(idx));
         const manual = document.getElementById('submit-manual-' + idx);
         if (manual && !br.data.stashdb_match) manual.addEventListener('click', () => onSubmitManualIdx(idx));
-        const apply = document.getElementById('md5-apply-' + idx);
-        if (apply) apply.addEventListener('click', () => onApplyMd5(idx));
       }
       const submitAllBtn = document.getElementById('submit-all-sure-btn');
       if (submitAllBtn) submitAllBtn.addEventListener('click', onSubmitAllSureMatches);
@@ -417,36 +393,6 @@
           });
         }
       });
-    }
-
-    async function onApplyMd5(idx) {
-      const br = batchResults[idx];
-      const inp = document.getElementById('md5-in-' + idx);
-      const btn = document.getElementById('md5-apply-' + idx);
-      if (!br || !br.url || br.error || !br.data) return;
-      const raw = (inp && inp.value) ? inp.value.trim() : '';
-      const md5 = normHex32(raw);
-      if (raw && md5.length !== 32) {
-        const msg = document.getElementById('md5-msg-' + idx);
-        if (msg) msg.textContent = 'MD5 must be 32 hexadecimal characters (or leave empty).';
-        return;
-      }
-      if (btn) btn.disabled = true;
-      try {
-        const { data } = await consumeRemoteHashesStream(br.url, md5.length === 32 ? md5 : '', (st) => {
-          const msg = document.getElementById('md5-msg-' + idx);
-          if (msg) msg.textContent = st;
-        });
-        batchResults[idx] = { url: br.url, data };
-        renderAll();
-        const msg = document.getElementById('md5-msg-' + idx);
-        if (msg) msg.textContent = 'Updated.';
-      } catch (e) {
-        const msg = document.getElementById('md5-msg-' + idx);
-        if (msg) msg.textContent = String(e.message || e);
-      } finally {
-        if (btn) btn.disabled = false;
-      }
     }
 
     document.getElementById('go-btn').addEventListener('click', async () => {
@@ -467,7 +413,7 @@
           resultEl.innerHTML =
             '<div class="muted" style="margin-bottom:0.75rem;">Processing ' + (i + 1) + ' / ' + urls.length + '…</div>';
           try {
-            const { data } = await consumeRemoteHashesStream(urls[i], '', (st) => {
+            const { data } = await consumeRemoteHashesStream(urls[i], (st) => {
               resultEl.innerHTML =
                 '<div class="muted" style="margin-bottom:0.75rem;">#'
                 + (i + 1) + ' / ' + urls.length + ' — <span class="hash">' + escapeHtml(urls[i]) + '</span><br>'

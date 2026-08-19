@@ -59,7 +59,7 @@ docker exec caddy caddy reload --config /etc/caddy/Caddyfile
 | Service         | Role                         | Host exposure |
 |-----------------|------------------------------|---------------|
 | `apu`           | Flask web UI + upload jobs   | none          |
-| `hasher-http`   | OSHASH / MD5 / PHASH sidecar | none          |
+| `hasher-http`   | OSHASH / PHASH sidecar | none          |
 | `thumber-http`  | Thumbnail generation         | none          |
 | `splitter-http` | Optional ffmpeg splitter     | none          |
 | `thumber`       | One-off CLI (`compose run`)  | none          |

@@ -129,7 +129,7 @@
     <div id="result"></div>
   </div>
 
-  <p class="muted"><a href="/oshash">Remote OSHASH</a> · <a href="/remotehash">Remote hashes</a> · <a href="/md5">MD5 → StashDB</a> · <a href="/">← Back to apu</a></p>
+  <p class="muted"><a href="/oshash">Remote OSHASH</a> · <a href="/remotehash">Remote hashes</a> · <a href="/">← Back to apu</a></p>
 
   <script>
     const STASHDB_CAN_SUBMIT_KNOWN = {{ stashdb_can_submit|tojson }};
@@ -179,10 +179,6 @@
         return s;
       }
       if (ev.type === 'phase') return String(ev.phase || '').replace(/_/g, ' ');
-      if (ev.type === 'progress' && ev.algorithm === 'MD5') {
-        const p = ev.pct != null ? Number(ev.pct).toFixed(1) + '%' : '';
-        return 'MD5 ' + p + ' (' + (ev.read_bytes || 0) + ' / ' + (ev.total_bytes || 0) + ' B)';
-      }
       return '';
     }
 
@@ -245,8 +241,6 @@
       if (ph.length === 16) fps.push({ algorithm: 'PHASH', hash: ph });
       const o = (data.oshash || '').replace(/[^a-fA-F0-9]/g, '').toLowerCase();
       if (o.length === 16) fps.push({ algorithm: 'OSHASH', hash: o });
-      const m = (data.md5 || '').replace(/[^a-fA-F0-9]/g, '').toLowerCase();
-      if (m.length === 32) fps.push({ algorithm: 'MD5', hash: m });
       return fps;
     }
 
