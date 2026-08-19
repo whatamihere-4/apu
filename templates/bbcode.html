@@ -703,6 +703,44 @@
       return parts.join(", ");
     }
 
+    function escapeRegex(value) {
+      return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    }
+
+    function fullNameInTitle(title, name) {
+      if (!title || !name) return false;
+      const re = new RegExp(`\\b${escapeRegex(name)}\\b`, "i");
+      return re.test(title);
+    }
+
+    function allActressFullNamesInTitle(title, performers) {
+      const named = performers.filter((p) => p.name);
+      if (!named.length) return false;
+      return named.every((p) => fullNameInTitle(title, p.name));
+    }
+
+    function linkActressNamesInTitle(title, performers) {
+      const sorted = performers
+        .filter((p) => p.name && p.link)
+        .slice()
+        .sort((a, b) => b.name.length - a.name.length);
+      let result = title;
+      for (const p of sorted) {
+        const re = new RegExp(`\\b${escapeRegex(p.name)}\\b`, "gi");
+        result = result.replace(re, (match) => `[URL='${p.link}']${match}[/URL]`);
+      }
+      return result;
+    }
+
+    function composeHeading(title) {
+      const performers = getPerformerRows().filter((p) => p.name);
+      if (allActressFullNamesInTitle(title, performers)) {
+        return linkActressNamesInTitle(title, performers);
+      }
+      const actressPart = actressHeadingPart();
+      return `${actressPart} - ${title}`;
+    }
+
     function clearActressRows() {
       actressListEl.innerHTML = "";
     }
@@ -939,7 +977,6 @@
     }
 
     function composeBbcode() {
-      const actressPart = actressHeadingPart();
       const title = fields["title"].value.trim();
       const imageBbcodeEl = fields["image-bbcode"];
       const sanitizedImg = sanitizeImageBbcodeInput(imageBbcodeEl.value);
@@ -986,7 +1023,7 @@
       const filesterMergeFooter = filesterOn && isSceneSplit() && PAGE_DATA.filesterMergePartsGuideUrl
         ? `[SIZE=${PAGE_DATA.filesterMergePartsGuideSize || 3}]Click [URL='${PAGE_DATA.filesterMergePartsGuideUrl}']here[/URL] to learn how to merge split video parts[/SIZE]`
         : "";
-      const output = `[HEADING=1]${actressPart} - ${title}[/HEADING]
+      const output = `[HEADING=1]${composeHeading(title)}[/HEADING]
 ${imageBbcode}
 [TABLE width="50%"]
 [TR]

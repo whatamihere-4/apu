@@ -52,6 +52,7 @@ class UploadResumeState:
     stashdb_scene_id: str | None = None
     stashdb_title: str | None = None
     stashdb_cover_path: str | None = None
+    split_dest_folder_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -63,6 +64,7 @@ class UploadResumeState:
             "stashdb_scene_id": self.stashdb_scene_id,
             "stashdb_title": self.stashdb_title,
             "stashdb_cover_path": self.stashdb_cover_path,
+            "split_dest_folder_id": self.split_dest_folder_id,
         }
 
     @classmethod
@@ -78,6 +80,7 @@ class UploadResumeState:
             stashdb_scene_id=data.get("stashdb_scene_id"),
             stashdb_title=data.get("stashdb_title"),
             stashdb_cover_path=data.get("stashdb_cover_path"),
+            split_dest_folder_id=data.get("split_dest_folder_id"),
         )
 
     def skip_part_indices(self) -> frozenset[int]:

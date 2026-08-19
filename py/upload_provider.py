@@ -116,6 +116,109 @@ def _split_mode_label(mode: str) -> str:
         "ffmpeg_slice": "ffmpeg per-part stream-copy (playable parts, one part on disk at a time)",
     }.get(mode, mode)
 
+
+class SplitUploadCoordinator:
+    """Progressive Filester split upload: scene folder early, parts routed incrementally."""
+
+    def __init__(
+        self,
+        *,
+        studio_folder_id: str | None,
+        fallback_name: str,
+        get_split_meta=None,
+        set_split_dest_folder_id=None,
+        resume_state: UploadResumeState,
+        resume_dir: str | None,
+        on_log=None,
+    ):
+        self.studio_folder_id = (studio_folder_id or "").strip() or None
+        self.fallback_name = fallback_name
+        self._get_split_meta = get_split_meta
+        self._set_split_dest = set_split_dest_folder_id
+        self._resume_state = resume_state
+        self._resume_dir = resume_dir
+        self._on_log = on_log
+        self._dest_folder_id = (resume_state.split_dest_folder_id or "").strip() or None
+        if self._dest_folder_id and set_split_dest_folder_id:
+            set_split_dest_folder_id(self._dest_folder_id)
+
+    @property
+    def dest_folder_id(self) -> str | None:
+        return self._dest_folder_id
+
+    def _meta(self) -> dict:
+        if not self._get_split_meta:
+            return {}
+        return self._get_split_meta() or {}
+
+    def _save_dest(self, folder_id: str) -> None:
+        fid = (folder_id or "").strip()
+        if not fid:
+            return
+        self._dest_folder_id = fid
+        self._resume_state.split_dest_folder_id = fid
+        if self._resume_dir:
+            save_upload_resume_state(self._resume_dir, self._resume_state)
+        if self._set_split_dest:
+            self._set_split_dest(fid)
+
+    def sync_from_job(self) -> None:
+        existing = (self._meta().get("dest_folder_id") or "").strip()
+        if existing:
+            self._dest_folder_id = existing
+            self._resume_state.split_dest_folder_id = existing
+
+    def ensure_scene_folder(self, *, allow_fallback: bool = False) -> str | None:
+        """Create StashDB-titled folder (or filename fallback) under the studio folder."""
+        self.sync_from_job()
+        if self._dest_folder_id:
+            cover = self._meta().get("cover_path")
+            if cover:
+                filester_upload.try_set_split_folder_thumbnail(
+                    self._dest_folder_id,
+                    cover,
+                    on_log=self._on_log,
+                )
+            return self._dest_folder_id
+        if not self.studio_folder_id:
+            return None
+        meta = self._meta()
+        scene_title = (meta.get("scene_title") or "").strip()
+        cover_path = meta.get("cover_path")
+        folder_title = scene_title or (self.fallback_name if allow_fallback else None)
+        if not folder_title:
+            return None
+        label = (
+            f"split upload: {scene_title} (StashDB)"
+            if scene_title
+            else f"split upload: {self.fallback_name}"
+        )
+        dest = filester_upload.prepare_split_scene_folder(
+            parent_folder_id=self.studio_folder_id,
+            folder_name=self.fallback_name,
+            folder_title=folder_title,
+            cover_image_path=cover_path if scene_title else None,
+            blacklist_label=label,
+            on_log=self._on_log,
+        )
+        self._save_dest(dest)
+        return dest
+
+    def upload_folder_for_part(self, part_index: int) -> str | None:
+        self.sync_from_job()
+        if part_index > 1 and self._dest_folder_id:
+            return self._dest_folder_id
+        return self.studio_folder_id
+
+    def after_part_uploaded(self, part_index: int, raw: dict) -> None:
+        if part_index != 1 or not self.studio_folder_id:
+            return
+        dest = self.ensure_scene_folder(allow_fallback=True)
+        if not dest or dest == self.studio_folder_id:
+            return
+        filester_upload.move_upload_response_to_folder(raw, dest, on_log=self._on_log)
+
+
 _legacy = (os.environ.get("UPLOAD_PROVIDER") or "").strip().lower()
 if _legacy in ("dual", "both"):
     _default_gofile, _default_filester = True, True
@@ -304,6 +407,8 @@ def _upload_filester_parts(
     resume_dir: str | None = None,
     resume_state: UploadResumeState | None = None,
     preserve_split_artifacts: bool = False,
+    get_split_meta=None,
+    set_split_dest_folder_id=None,
 ) -> tuple[list[UploadResult], str | None]:
     from downloader import TransferCancelled
 
@@ -343,6 +448,7 @@ def _upload_filester_parts(
             folder_id=upload_folder_id,
             on_progress=on_progress,
             should_cancel=should_cancel,
+            on_log=on_log,
         )
         result = _normalize_filester(raw)
         results.append(result)
@@ -374,18 +480,30 @@ def _upload_filester_parts(
         )
 
     if resume_state.upload_complete():
-        return results, upload_folder_id
+        dest = (resume_state.split_dest_folder_id or "").strip() or upload_folder_id
+        return results, dest or upload_folder_id
 
     token = (job_id or "").strip() or uuid.uuid4().hex[:8]
     out_dir = os.path.join(os.path.dirname(src) or ".", f".split_{token}")
     os.makedirs(out_dir, exist_ok=True)
     original_basename = os.path.basename(src)
     stem, _ext = os.path.splitext(original_basename)
+    fallback_name = stem or "upload"
+    split_coord = SplitUploadCoordinator(
+        studio_folder_id=upload_folder_id,
+        fallback_name=fallback_name,
+        get_split_meta=get_split_meta,
+        set_split_dest_folder_id=set_split_dest_folder_id,
+        resume_state=resume_state,
+        resume_dir=resume_dir,
+        on_log=on_log,
+    )
+    split_coord.ensure_scene_folder(allow_fallback=False)
 
     if upload_folder_id and on_log:
         on_log(
-            "[Filester] Split parts upload to studio folder first; "
-            "subfolder (StashDB title or filename) is created after upload"
+            "[Filester] Progressive split: scene folder when StashDB is ready; "
+            "part 1 → studio then moved; later parts → scene folder"
         )
     if on_log:
         if FILESTER_SPLIT_MODE == "optimal" and needs_split:
@@ -468,6 +586,9 @@ def _upload_filester_parts(
             part_index = int(part.get("part_index") or 0)
             if part_index in skip_part_indices:
                 continue
+            if part_index > 1:
+                split_coord.ensure_scene_folder(allow_fallback=True)
+            target_folder_id = split_coord.upload_folder_for_part(part_index)
             if split_progress is not None and part_count > 1 and part_index > 0:
                 split_progress.register_part(
                     part_index,
@@ -476,20 +597,27 @@ def _upload_filester_parts(
                     part_count,
                 )
             if on_log and not part.get("is_source"):
+                dest_hint = (
+                    "scene folder"
+                    if target_folder_id and target_folder_id != upload_folder_id
+                    else "studio folder"
+                )
                 on_log(
                     f"[Filester] Uploading part {part_index}/{part_count}: "
-                    f"{part['filename']} ({format_size(part['size_bytes'])})"
+                    f"{part['filename']} ({format_size(part['size_bytes'])}) → {dest_hint}"
                 )
             part_on_progress = on_progress
             if split_progress is not None and part_count > 1 and part_index > 0:
                 part_on_progress = split_progress.wrap_part(part_index)
             raw = filester_upload.upload_file(
                 part_path,
-                folder_id=upload_folder_id,
+                folder_id=target_folder_id,
                 on_progress=part_on_progress,
                 should_cancel=should_cancel,
+                on_log=on_log,
             )
             result = _normalize_filester(raw, part=part)
+            split_coord.after_part_uploaded(part_index, raw)
             slug = filester_upload.file_identifier_from_response(raw)
             if resume_dir and result.ok and slug:
                 uploaded = UploadedPart(
@@ -550,7 +678,8 @@ def _upload_filester_parts(
             if resume_dir:
                 shutil.rmtree(resume_dir, ignore_errors=True)
 
-    return results, upload_folder_id
+    dest_folder = split_coord.dest_folder_id or upload_folder_id
+    return results, dest_folder
 
 
 def upload_source(
@@ -565,6 +694,8 @@ def upload_source(
     resume_dir: str | None = None,
     resume_state: UploadResumeState | None = None,
     preserve_split_artifacts: bool = False,
+    get_split_meta=None,
+    set_split_dest_folder_id=None,
 ) -> tuple[list[UploadResult], str | None, str | None]:
     """Upload a file or directory to all enabled/feasible providers.
 
@@ -630,6 +761,8 @@ def upload_source(
                 resume_dir=resume_dir,
                 resume_state=resume_state,
                 preserve_split_artifacts=preserve_split_artifacts,
+                get_split_meta=get_split_meta,
+                set_split_dest_folder_id=set_split_dest_folder_id,
             )
             src_results.extend(fs_results)
             if effective_fs_folder:

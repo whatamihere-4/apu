@@ -38,6 +38,7 @@ from upload_provider import (
     ACTIVE_PROVIDERS,
     FILESTER_SPLIT_MODE,
     FILESTER_SPLIT_FALLBACK,
+    FILESTER_MAX_PART_BYTES,
     resolve_split_mode,
 )
 from upload_progress import UploadProgressReporter
@@ -46,6 +47,8 @@ from filester_upload import (
     apply_folder_blacklist,
     fetch_folder_map_from_api,
     organize_split_parts_into_folder,
+    prepare_split_scene_folder,
+    try_set_split_folder_thumbnail,
 )
 from oshash_remote import fetch_oshash_from_url
 from gif_host import gif_encode_limits, resolved_gif_host
@@ -311,6 +314,54 @@ def _load_gofile_folders():
         except (FileNotFoundError, json.JSONDecodeError):
             continue
     return {}
+
+
+def _filester_split_job_accessors(job_id: str):
+    """Callbacks so Filester split upload can read/update per-job scene folder state."""
+
+    def get_split_meta() -> dict:
+        job = jobs.get(job_id) or {}
+        match = job.get("stashdb_match") or {}
+        return {
+            "dest_folder_id": (job.get("filester_split_dest_folder_id") or "").strip() or None,
+            "scene_title": (match.get("title") or "").strip(),
+            "cover_path": job.get("stashdb_cover_path"),
+        }
+
+    def set_split_dest_folder_id(folder_id: str) -> None:
+        job = jobs.get(job_id)
+        if job is not None:
+            job["filester_split_dest_folder_id"] = folder_id
+
+    return get_split_meta, set_split_dest_folder_id
+
+
+def _maybe_prepare_filester_split_folder(job_id: str) -> None:
+    """When StashDB matches during an in-flight split upload, create the scene folder early."""
+    job = jobs.get(job_id)
+    if not job or not job.get("filester_split_active"):
+        return
+    if job.get("status") != "uploading":
+        return
+    studio = (job.get("filester_folder_id") or "").strip()
+    if not studio or (job.get("filester_split_dest_folder_id") or "").strip():
+        return
+    match = job.get("stashdb_match") or {}
+    scene_title = (match.get("title") or "").strip()
+    if not scene_title:
+        return
+    source = (job.get("source_filename") or "upload").strip()
+    stem, _ext = os.path.splitext(source)
+    log_fn = lambda ln: _append_job_log(job_id, ln)
+    dest = prepare_split_scene_folder(
+        parent_folder_id=studio,
+        folder_name=stem or "upload",
+        folder_title=scene_title,
+        cover_image_path=job.get("stashdb_cover_path"),
+        blacklist_label=f"split upload: {scene_title} (StashDB)",
+        on_log=log_fn,
+    )
+    job["filester_split_dest_folder_id"] = dest
 
 
 def _load_filester_folders():
@@ -4958,6 +5009,7 @@ def _stashdb_post_upload_check(job_id, downloaded_path, *, parallel_with_upload:
             _append_hasher_log(job_id, "StashDB cover cached for folder thumbnail")
         else:
             job.pop("stashdb_cover_path", None)
+        _maybe_prepare_filester_split_folder(job_id)
         job["stashdb_helper_url"] = _bbcode_helper_url(
             matched_scene["id"], filename, _scenes_get(filename, expected_size=size) or entry
         )
@@ -6227,36 +6279,48 @@ def _finalize_upload(
     effective_filester_folder = filester_folder_id
     if split_info and filester_part_urls and filester_folder_id:
         job = jobs.get(job_id) or {}
-        studio_folder_id = (job.get("filester_folder_id") or "").strip()
-        filester_raws = [
-            r.raw for r in results
-            if r.provider == "filester" and r.ok and r.was_split
-        ]
-        match = job.get("stashdb_match") or {}
-        scene_title = (match.get("title") or "").strip()
-        cover_path = job.get("stashdb_cover_path")
-        log_fn = lambda ln: _append_job_log(job_id, ln)
-        if studio_folder_id and filester_raws:
-            original = (
-                split_info.get("original_basename")
-                or job.get("source_filename")
-                or "upload"
-            )
-            stem, _ext = os.path.splitext(os.path.basename(original))
-            fallback_name = stem or "upload"
-            effective_filester_folder = organize_split_parts_into_folder(
-                parent_folder_id=studio_folder_id,
-                folder_name=fallback_name,
-                folder_title=scene_title or None,
-                cover_image_path=cover_path if scene_title else None,
-                upload_responses=filester_raws,
-                blacklist_label=(
-                    f"split upload: {scene_title} (StashDB)"
-                    if scene_title
-                    else f"split upload: {fallback_name}"
-                ),
-                on_log=log_fn,
-            )
+        progressive_dest = (job.get("filester_split_dest_folder_id") or "").strip()
+        if progressive_dest:
+            effective_filester_folder = progressive_dest
+            cover_path = job.get("stashdb_cover_path")
+            if cover_path:
+                try_set_split_folder_thumbnail(
+                    progressive_dest,
+                    cover_path,
+                    on_log=lambda ln: _append_job_log(job_id, ln),
+                )
+        else:
+            studio_folder_id = (job.get("filester_folder_id") or "").strip()
+            filester_raws = [
+                r.raw for r in results
+                if r.provider == "filester" and r.ok and r.was_split
+            ]
+            match = job.get("stashdb_match") or {}
+            scene_title = (match.get("title") or "").strip()
+            cover_path = job.get("stashdb_cover_path")
+            log_fn = lambda ln: _append_job_log(job_id, ln)
+            if studio_folder_id and filester_raws:
+                log_fn("[Filester] Finalizing split upload (subfolder, move parts, thumbnail)…")
+                original = (
+                    split_info.get("original_basename")
+                    or job.get("source_filename")
+                    or "upload"
+                )
+                stem, _ext = os.path.splitext(os.path.basename(original))
+                fallback_name = stem or "upload"
+                effective_filester_folder = organize_split_parts_into_folder(
+                    parent_folder_id=studio_folder_id,
+                    folder_name=fallback_name,
+                    folder_title=scene_title or None,
+                    cover_image_path=cover_path if scene_title else None,
+                    upload_responses=filester_raws,
+                    blacklist_label=(
+                        f"split upload: {scene_title} (StashDB)"
+                        if scene_title
+                        else f"split upload: {fallback_name}"
+                    ),
+                    on_log=log_fn,
+                )
 
     gofile_url = gofile_urls[0] if gofile_urls else ""
     if filester_part_urls:
@@ -6461,6 +6525,13 @@ def _start_link_job(url, folder_id=None, *, job_id=None, resume_upload=False):
                 jobs[job_id]["status_text"] = f"Uploading {fname} → {folder_name}..."
             filester_folder_id = _resolve_filester_folder_id(folder_id)
             jobs[job_id]["filester_folder_id"] = filester_folder_id or ""
+            if (
+                is_video
+                and FILESTER_ENABLED
+                and os.path.getsize(downloaded_path) > FILESTER_MAX_PART_BYTES
+            ):
+                jobs[job_id]["filester_split_active"] = True
+            fs_get_meta, fs_set_dest = _filester_split_job_accessors(job_id)
             try:
                 results, filester_skip, fs_url_folder = upload_source(
                     downloaded_path,
@@ -6473,6 +6544,8 @@ def _start_link_job(url, folder_id=None, *, job_id=None, resume_upload=False):
                     delete_source_after_upload=True,
                     resume_dir=resume_dir,
                     preserve_split_artifacts=resume_upload,
+                    get_split_meta=fs_get_meta,
+                    set_split_dest_folder_id=fs_set_dest,
                 )
             finally:
                 if is_video:
@@ -6644,6 +6717,13 @@ def _start_path_job(path, folder_id=None, *, job_id=None, resume_upload=False):
                 jobs[job_id]["status_text"] = f"Starting upload → {folder_name}..."
             filester_folder_id = _resolve_filester_folder_id(folder_id)
             jobs[job_id]["filester_folder_id"] = filester_folder_id or ""
+            if (
+                is_vid_file
+                and FILESTER_ENABLED
+                and os.path.getsize(path) > FILESTER_MAX_PART_BYTES
+            ):
+                jobs[job_id]["filester_split_active"] = True
+            fs_get_meta, fs_set_dest = _filester_split_job_accessors(job_id)
             try:
                 results, filester_skip, fs_url_folder = upload_source(
                     path,
@@ -6655,6 +6735,8 @@ def _start_path_job(path, folder_id=None, *, job_id=None, resume_upload=False):
                     job_id=job_id,
                     resume_dir=resume_dir,
                     preserve_split_artifacts=resume_upload,
+                    get_split_meta=fs_get_meta,
+                    set_split_dest_folder_id=fs_set_dest,
                 )
             finally:
                 if is_vid_file:

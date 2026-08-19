@@ -10,6 +10,7 @@ import json
 import mimetypes
 import os
 import re
+import threading
 import time
 import urllib.parse
 from pathlib import Path
@@ -30,6 +31,29 @@ FILESTER_ROOT_FOLDER_ID = (os.environ.get("FILESTER_ROOT_FOLDER_ID") or "").stri
 FILESTER_ROOT_FOLDER_NAME = (os.environ.get("FILESTER_ROOT_FOLDER_NAME") or "VR").strip()
 
 _FOLDER_NAME_MAX = 100
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in ("0", "false", "no", "off")
+
+
+# After all upload bytes are sent, wait this long for the HTTP response before
+# polling the folder API to confirm the file landed (recovers hung Filester ACKs).
+FILESTER_UPLOAD_VERIFY_ENABLED = _env_bool("FILESTER_UPLOAD_VERIFY_ENABLED", True)
+FILESTER_UPLOAD_VERIFY_AFTER_SEC = max(0, _env_int("FILESTER_UPLOAD_VERIFY_AFTER_SEC", 120))
+FILESTER_UPLOAD_VERIFY_POLL_SEC = max(1, _env_int("FILESTER_UPLOAD_VERIFY_POLL_SEC", 15))
+# Extra time spent polling after VERIFY_AFTER before giving up (0 = unlimited).
+FILESTER_UPLOAD_VERIFY_MAX_SEC = max(0, _env_int("FILESTER_UPLOAD_VERIFY_MAX_SEC", 900))
 
 
 def _auth_headers():
@@ -482,27 +506,103 @@ def upload_folder_thumbnail_image(
     )
 
 
-def upload_file(filepath, folder_id=None, on_progress=None, should_cancel=None):
-    """Upload a single file to Filester.
+def _file_row_matches_upload(
+    row: dict,
+    filename: str,
+    expected_size: int,
+    *,
+    size_tolerance: int = 0,
+) -> bool:
+    name = str(row.get("name") or "").strip()
+    if name != filename:
+        return False
+    if expected_size <= 0:
+        return True
+    try:
+        remote_size = int(row.get("size") or 0)
+    except (TypeError, ValueError):
+        return False
+    if remote_size <= 0:
+        return False
+    return abs(remote_size - expected_size) <= size_tolerance
 
-    on_progress(pct, uploaded, total, speed, eta_seconds) is called at most
-    once per second. should_cancel(): if it returns True, abort (TransferCancelled).
-    Returns the raw Filester JSON response.
-    """
-    filename = os.path.basename(filepath)
-    filesize = os.path.getsize(filepath)
+
+def find_uploaded_file_in_folder(
+    folder_id: str | None,
+    filename: str,
+    expected_size: int,
+    *,
+    size_tolerance: int = 0,
+) -> dict | None:
+    """Return a folder file row when ``filename`` is present at ``expected_size``."""
+    fid = (folder_id or "").strip()
+    if not fid:
+        return None
+    try:
+        rows = list_folder_files(fid)
+    except requests.RequestException:
+        return None
+    for row in rows:
+        if isinstance(row, dict) and _file_row_matches_upload(
+            row, filename, expected_size, size_tolerance=size_tolerance
+        ):
+            return row
+    return None
+
+
+def upload_response_from_folder_file(row: dict) -> dict:
+    """Build an upload-style JSON body from GET folder/files listing row."""
+    url = str(row.get("url") or "").strip()
+    slug = str(row.get("slug") or "").strip()
+    if not slug and url and "/d/" in url:
+        slug = url.rsplit("/d/", 1)[-1].split("?")[0].strip()
+    file_id = row.get("id")
+    if file_id is None:
+        file_id = row.get("file_id")
+    out: dict = {
+        "success": True,
+        "message": "File verified on server (upload response hung)",
+        "verified_via_folder_listing": True,
+    }
+    if slug:
+        out["slug"] = slug
+    if url:
+        out["url"] = url
+    elif slug:
+        out["url"] = f"{FILESTER_SITE_URL}/d/{slug}"
+    if file_id is not None:
+        out["file_id"] = file_id
+    thumb = row.get("thumbnail_url")
+    if thumb:
+        out["thumbnail_url"] = thumb
+    return out
+
+
+def _upload_post_once(
+    filepath: str,
+    *,
+    filename: str,
+    filesize: int,
+    folder_id: str | None,
+    on_progress,
+    should_cancel,
+    on_log=None,
+) -> requests.Response:
+    """POST multipart upload; runs in a worker thread when verify recovery is enabled."""
     url = f"{FILESTER_BASE_URL}/api/v1/upload"
-    print(
-        f"[FILESTER] upload {filename} ({format_size(filesize)}) -> {url}",
-        flush=True,
-    )
-
     last_log = [0.0]
     start_time = [time.time()]
+    bytes_complete_at = [None]
 
     def progress_callback(monitor):
         if should_cancel and should_cancel():
             raise TransferCancelled("Upload cancelled")
+        if (
+            bytes_complete_at[0] is None
+            and monitor.len
+            and monitor.bytes_read >= monitor.len
+        ):
+            bytes_complete_at[0] = time.time()
         now = time.time()
         if now - last_log[0] < 1.0:
             return
@@ -522,35 +622,174 @@ def upload_file(filepath, folder_id=None, on_progress=None, should_cancel=None):
         if on_progress:
             on_progress(pct, uploaded, monitor.len, speed, remaining)
 
+    with open(filepath, "rb") as fp:
+        fields = {"file": (filename, fp, "application/octet-stream")}
+        encoder = MultipartEncoder(fields=fields)
+        monitor = MultipartEncoderMonitor(encoder, progress_callback)
+        headers = _auth_headers()
+        headers["Content-Type"] = monitor.content_type
+        if folder_id:
+            headers["X-Folder-ID"] = folder_id
+        return requests.post(
+            url,
+            data=monitor,
+            headers=headers,
+            timeout=(30, None),
+        )
+
+
+def _wait_for_upload_response(
+    filepath: str,
+    *,
+    filename: str,
+    filesize: int,
+    folder_id: str | None,
+    on_progress,
+    should_cancel,
+    on_log=None,
+) -> requests.Response | dict:
+    """Run upload POST with folder-listing recovery when the HTTP ACK hangs."""
+    if not FILESTER_UPLOAD_VERIFY_ENABLED or not (folder_id or "").strip():
+        return _upload_post_once(
+            filepath,
+            filename=filename,
+            filesize=filesize,
+            folder_id=folder_id,
+            on_progress=on_progress,
+            should_cancel=should_cancel,
+            on_log=on_log,
+        )
+
+    response_box: dict = {}
+    error_box: dict = {}
+    bytes_complete_at: list[float | None] = [None]
+    done = threading.Event()
+    last_status_log = [0.0]
+    verify_announced = [False]
+
+    def progress_with_bytes(pct, uploaded, total, speed, eta):
+        if total and uploaded >= total and bytes_complete_at[0] is None:
+            bytes_complete_at[0] = time.time()
+        if on_progress:
+            on_progress(pct, uploaded, total, speed, eta)
+
+    def worker() -> None:
+        try:
+            response_box["response"] = _upload_post_once(
+                filepath,
+                filename=filename,
+                filesize=filesize,
+                folder_id=folder_id,
+                on_progress=progress_with_bytes,
+                should_cancel=should_cancel,
+                on_log=on_log,
+            )
+        except Exception as exc:  # noqa: BLE001
+            error_box["error"] = exc
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=worker, name=f"filester-upload-{filename}", daemon=True)
+    thread.start()
+
+    poll = FILESTER_UPLOAD_VERIFY_POLL_SEC
+    verify_after = FILESTER_UPLOAD_VERIFY_AFTER_SEC
+    max_verify = FILESTER_UPLOAD_VERIFY_MAX_SEC
+
+    while not done.wait(timeout=poll):
+        if should_cancel and should_cancel():
+            raise TransferCancelled("Upload cancelled")
+        if error_box:
+            raise error_box["error"]
+        completed_at = bytes_complete_at[0]
+        if completed_at is None:
+            continue
+        elapsed = time.time() - completed_at
+        if elapsed < verify_after:
+            continue
+        if on_log and not verify_announced[0]:
+            verify_announced[0] = True
+            on_log(
+                f"[Filester] {filename}: all bytes sent; no upload ACK after "
+                f"{verify_after}s — polling folder for completed file"
+            )
+        row = find_uploaded_file_in_folder(folder_id, filename, filesize)
+        if row:
+            msg = (
+                f"[Filester] {filename}: verified in folder after {int(elapsed)}s "
+                f"with no upload ACK; continuing"
+            )
+            print(msg, flush=True)
+            if on_log:
+                on_log(msg)
+            return upload_response_from_folder_file(row)
+        if max_verify > 0 and elapsed > verify_after + max_verify:
+            raise RuntimeError(
+                f"Filester upload ACK hung for {filename!r} and file not found in folder "
+                f"after {int(elapsed)}s (verify max {max_verify}s)"
+            )
+        if on_log and elapsed - last_status_log[0] >= 60:
+            last_status_log[0] = elapsed
+            on_log(
+                f"[Filester] {filename}: still waiting for upload ACK "
+                f"({int(elapsed)}s since bytes sent; polling folder…)"
+            )
+
+    if error_box:
+        raise error_box["error"]
+    return response_box["response"]
+
+
+def upload_file(
+    filepath,
+    folder_id=None,
+    on_progress=None,
+    should_cancel=None,
+    on_log=None,
+):
+    """Upload a single file to Filester.
+
+    on_progress(pct, uploaded, total, speed, eta_seconds) is called at most
+    once per second. should_cancel(): if it returns True, abort (TransferCancelled).
+    Returns the raw Filester JSON response.
+    """
+    filename = os.path.basename(filepath)
+    filesize = os.path.getsize(filepath)
+    print(
+        f"[FILESTER] upload {filename} ({format_size(filesize)}) -> {FILESTER_BASE_URL}/api/v1/upload",
+        flush=True,
+    )
+
     last_err = None
     for attempt in range(1, 4):
         if should_cancel and should_cancel():
             raise TransferCancelled("Upload cancelled")
         try:
-            with open(filepath, "rb") as fp:
-                fields = {"file": (filename, fp, "application/octet-stream")}
-                encoder = MultipartEncoder(fields=fields)
-                monitor = MultipartEncoderMonitor(encoder, progress_callback)
-                headers = _auth_headers()
-                headers["Content-Type"] = monitor.content_type
-                if folder_id:
-                    headers["X-Folder-ID"] = folder_id
-                r = requests.post(url, data=monitor, headers=headers)
-
-            if r.status_code == 429:
-                last_err = RuntimeError("Filester rate limit (429)")
-                print(f"[FILESTER] attempt {attempt} rate limited, backing off", flush=True)
-                time.sleep(min(5 * attempt, 30))
-                continue
-            if r.status_code >= 500:
-                snippet = (r.text or "")[:300]
-                last_err = RuntimeError(f"Filester returned HTTP {r.status_code}: {snippet}")
-                print(f"[FILESTER] attempt {attempt} got {r.status_code}, retrying", flush=True)
-                time.sleep(min(2 * attempt, 8))
-                continue
-
-            r.raise_for_status()
-            result = r.json()
+            r = _wait_for_upload_response(
+                filepath,
+                filename=filename,
+                filesize=filesize,
+                folder_id=folder_id,
+                on_progress=on_progress,
+                should_cancel=should_cancel,
+                on_log=on_log,
+            )
+            if isinstance(r, dict):
+                result = r
+            else:
+                if r.status_code == 429:
+                    last_err = RuntimeError("Filester rate limit (429)")
+                    print(f"[FILESTER] attempt {attempt} rate limited, backing off", flush=True)
+                    time.sleep(min(5 * attempt, 30))
+                    continue
+                if r.status_code >= 500:
+                    snippet = (r.text or "")[:300]
+                    last_err = RuntimeError(f"Filester returned HTTP {r.status_code}: {snippet}")
+                    print(f"[FILESTER] attempt {attempt} got {r.status_code}, retrying", flush=True)
+                    time.sleep(min(2 * attempt, 8))
+                    continue
+                r.raise_for_status()
+                result = r.json()
             break
         except TransferCancelled:
             raise
@@ -566,7 +805,8 @@ def upload_file(filepath, folder_id=None, on_progress=None, should_cancel=None):
 
     if result.get("success"):
         dl = gallery_url_from_response(result) or "N/A"
-        print(f"[FILESTER] {filename} DONE -> {dl}", flush=True)
+        suffix = " (verified via folder listing)" if result.get("verified_via_folder_listing") else ""
+        print(f"[FILESTER] {filename} DONE{suffix} -> {dl}", flush=True)
     else:
         print(f"[FILESTER] {filename} FAILED: {result}", flush=True)
 
@@ -722,6 +962,95 @@ def delete_empty_folder(folder_id: str, *, on_log=None) -> bool:
     return True
 
 
+def prepare_split_scene_folder(
+    *,
+    parent_folder_id: str,
+    folder_name: str,
+    folder_title: str | None = None,
+    cover_image_path: str | Path | None = None,
+    blacklist_label: str = "",
+    on_log=None,
+) -> str:
+    """Create a split-upload scene subfolder and optionally set its thumbnail."""
+    parent = (parent_folder_id or "").strip()
+    display_name = (folder_title or folder_name or "").strip() or folder_name
+    title = sanitize_folder_name(display_name)
+    if not parent or not title:
+        return parent
+
+    dest_folder_id = create_folder(parent, title)
+    record_upload_subfolder(
+        dest_folder_id,
+        label=blacklist_label or f"split upload: {title}",
+    )
+    if on_log:
+        on_log(
+            f'[Filester] Created split scene folder "{title}" ({folder_url(dest_folder_id)})'
+        )
+
+    cover = Path(cover_image_path) if cover_image_path else None
+    if cover and cover.is_file():
+        try:
+            set_folder_thumbnail(dest_folder_id, str(cover))
+            if on_log:
+                on_log(f"[Filester] Folder thumbnail set for {title}")
+        except Exception as exc:  # noqa: BLE001
+            if on_log:
+                on_log(f"[Filester] Folder thumbnail upload failed: {exc}")
+            print(f"[FILESTER] folder thumbnail failed for {title}: {exc}", flush=True)
+
+    return dest_folder_id
+
+
+def try_set_split_folder_thumbnail(
+    folder_id: str,
+    cover_image_path: str | Path | None,
+    *,
+    on_log=None,
+) -> bool:
+    """Set folder cover when StashDB art arrives after the folder was created."""
+    fid = (folder_id or "").strip()
+    cover = Path(cover_image_path) if cover_image_path else None
+    if not fid or not cover or not cover.is_file():
+        return False
+    try:
+        set_folder_thumbnail(fid, str(cover))
+        if on_log:
+            on_log(f"[Filester] Folder thumbnail updated ({folder_url(fid)})")
+        return True
+    except Exception as exc:  # noqa: BLE001
+        if on_log:
+            on_log(f"[Filester] Folder thumbnail upload failed: {exc}")
+        print(f"[FILESTER] folder thumbnail failed for {fid}: {exc}", flush=True)
+        return False
+
+
+def move_upload_response_to_folder(
+    upload_response: dict,
+    dest_folder_id: str,
+    *,
+    on_log=None,
+) -> bool:
+    """Move one uploaded file into ``dest_folder_id``."""
+    fid = file_identifier_from_response(upload_response)
+    dest = (dest_folder_id or "").strip()
+    if not fid or not dest:
+        return False
+    move_data = move_files([fid], dest)
+    moved = int(move_data.get("moved") or 0)
+    failed = int(move_data.get("failed") or 0)
+    if failed or moved < 1:
+        if on_log:
+            on_log(
+                f"[Filester] Move into scene folder incomplete "
+                f"({moved}/1 moved, {failed} failed)"
+            )
+        return False
+    if on_log:
+        on_log(f"[Filester] Moved part into scene folder ({folder_url(dest)})")
+    return True
+
+
 def organize_split_parts_into_folder(
     *,
     parent_folder_id: str,
@@ -757,39 +1086,30 @@ def organize_split_parts_into_folder(
         return parent
 
     try:
-        dest_folder_id = create_folder(parent, title)
-        move_data = move_files(file_ids, dest_folder_id)
-        moved = int(move_data.get("moved") or 0)
-        failed = int(move_data.get("failed") or 0)
-        if failed or moved < len(file_ids):
+        dest_folder_id = prepare_split_scene_folder(
+            parent_folder_id=parent,
+            folder_name=folder_name,
+            folder_title=folder_title,
+            cover_image_path=cover_image_path,
+            blacklist_label=blacklist_label,
+            on_log=on_log,
+        )
+        moved = 0
+        for raw in upload_responses:
+            if move_upload_response_to_folder(raw, dest_folder_id, on_log=on_log):
+                moved += 1
+        if moved < len(file_ids):
             if on_log:
                 on_log(
                     f"[Filester] Split folder move incomplete "
-                    f"({moved}/{len(file_ids)} moved, {failed} failed); "
-                    f"parts remain in studio folder"
+                    f"({moved}/{len(file_ids)} moved); parts remain in studio folder"
                 )
             return parent
-        record_upload_subfolder(
-            dest_folder_id,
-            label=blacklist_label or f"split upload: {title}",
-        )
         if on_log:
             on_log(
                 f'[Filester] Moved {moved} part(s) into folder "{title}" '
                 f"({folder_url(dest_folder_id)})"
             )
-
-        cover = Path(cover_image_path) if cover_image_path else None
-        if cover and cover.is_file():
-            try:
-                set_folder_thumbnail(dest_folder_id, str(cover))
-                if on_log:
-                    on_log(f"[Filester] Folder thumbnail set for {title}")
-            except Exception as exc:  # noqa: BLE001
-                if on_log:
-                    on_log(f"[Filester] Folder thumbnail upload failed: {exc}")
-                print(f"[FILESTER] folder thumbnail failed for {title}: {exc}", flush=True)
-
         return dest_folder_id
     except Exception as e:  # noqa: BLE001
         if on_log:
