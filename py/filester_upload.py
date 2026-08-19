@@ -70,9 +70,7 @@ FILESTER_UPLOAD_VERIFY_SIZE_TOLERANCE = max(
 def _verify_size_tolerance(expected_size: int) -> int:
     if FILESTER_UPLOAD_VERIFY_SIZE_TOLERANCE > 0:
         return FILESTER_UPLOAD_VERIFY_SIZE_TOLERANCE
-    if expected_size <= 0:
-        return 0
-    return max(1_048_576, int(expected_size * 0.002))
+    return 0
 
 
 def _auth_headers():
@@ -856,9 +854,10 @@ def _wait_for_upload_response(
             on_log=on_log,
         )
         if row:
+            remote_size = int(row.get("size") or 0)
             msg = (
                 f"[Filester] {filename}: verified in folder after {int(elapsed)}s "
-                f"with no upload ACK; continuing"
+                f"with no upload ACK ({remote_size:,} B); continuing"
             )
             print(msg, flush=True)
             if on_log:

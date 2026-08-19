@@ -336,6 +336,17 @@ def _filester_split_job_accessors(job_id: str):
     return get_split_meta, set_split_dest_folder_id
 
 
+_filester_split_folder_locks: dict[str, threading.Lock] = {}
+_filester_split_folder_locks_guard = threading.Lock()
+
+
+def _filester_split_folder_lock(job_id: str) -> threading.Lock:
+    with _filester_split_folder_locks_guard:
+        if job_id not in _filester_split_folder_locks:
+            _filester_split_folder_locks[job_id] = threading.Lock()
+        return _filester_split_folder_locks[job_id]
+
+
 def _maybe_prepare_filester_split_folder(job_id: str) -> None:
     """When StashDB matches during an in-flight split upload, create the scene folder early."""
     job = jobs.get(job_id)
@@ -353,20 +364,24 @@ def _maybe_prepare_filester_split_folder(job_id: str) -> None:
     source = (job.get("source_filename") or "upload").strip()
     stem, _ext = os.path.splitext(source)
     log_fn = lambda ln: _append_job_log(job_id, ln)
-    try:
-        dest = prepare_split_scene_folder(
-            parent_folder_id=studio,
-            folder_name=stem or "upload",
-            folder_title=scene_title,
-            cover_image_path=job.get("stashdb_cover_path"),
-            blacklist_label=f"split upload: {scene_title} (StashDB)",
-            on_log=log_fn,
-        )
-        job["filester_split_dest_folder_id"] = dest
-    except Exception as exc:  # noqa: BLE001
-        log_fn(
-            f"[Filester] Early scene folder create failed (will retry after part 1): {exc}"
-        )
+    with _filester_split_folder_lock(job_id):
+        job = jobs.get(job_id)
+        if not job or (job.get("filester_split_dest_folder_id") or "").strip():
+            return
+        try:
+            dest = prepare_split_scene_folder(
+                parent_folder_id=studio,
+                folder_name=stem or "upload",
+                folder_title=scene_title,
+                cover_image_path=job.get("stashdb_cover_path"),
+                blacklist_label=f"split upload: {scene_title} (StashDB)",
+                on_log=log_fn,
+            )
+            job["filester_split_dest_folder_id"] = dest
+        except Exception as exc:  # noqa: BLE001
+            log_fn(
+                f"[Filester] Early scene folder create failed (will retry after part 1): {exc}"
+            )
 
 
 def _load_filester_folders():
@@ -6557,6 +6572,7 @@ def _start_link_job(url, folder_id=None, *, job_id=None, resume_upload=False):
             ):
                 jobs[job_id]["filester_split_active"] = True
             fs_get_meta, fs_set_dest = _filester_split_job_accessors(job_id)
+            fs_folder_lock = lambda: _filester_split_folder_lock(job_id)
             try:
                 results, filester_skip, fs_url_folder = upload_source(
                     downloaded_path,
@@ -6571,6 +6587,7 @@ def _start_link_job(url, folder_id=None, *, job_id=None, resume_upload=False):
                     preserve_split_artifacts=resume_upload,
                     get_split_meta=fs_get_meta,
                     set_split_dest_folder_id=fs_set_dest,
+                    folder_lock=fs_folder_lock,
                 )
             finally:
                 if is_video:
@@ -6749,6 +6766,7 @@ def _start_path_job(path, folder_id=None, *, job_id=None, resume_upload=False):
             ):
                 jobs[job_id]["filester_split_active"] = True
             fs_get_meta, fs_set_dest = _filester_split_job_accessors(job_id)
+            fs_folder_lock = lambda: _filester_split_folder_lock(job_id)
             try:
                 results, filester_skip, fs_url_folder = upload_source(
                     path,
@@ -6762,6 +6780,7 @@ def _start_path_job(path, folder_id=None, *, job_id=None, resume_upload=False):
                     preserve_split_artifacts=resume_upload,
                     get_split_meta=fs_get_meta,
                     set_split_dest_folder_id=fs_set_dest,
+                    folder_lock=fs_folder_lock,
                 )
             finally:
                 if is_vid_file:

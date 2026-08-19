@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import shutil
 import uuid
+from contextlib import nullcontext
 
 import byte_splitter
 import file_splitter
@@ -127,6 +128,7 @@ class SplitUploadCoordinator:
         fallback_name: str,
         get_split_meta=None,
         set_split_dest_folder_id=None,
+        folder_lock=None,
         resume_state: UploadResumeState,
         resume_dir: str | None,
         on_log=None,
@@ -135,6 +137,7 @@ class SplitUploadCoordinator:
         self.fallback_name = fallback_name
         self._get_split_meta = get_split_meta
         self._set_split_dest = set_split_dest_folder_id
+        self._folder_lock = folder_lock
         self._resume_state = resume_state
         self._resume_dir = resume_dir
         self._on_log = on_log
@@ -170,47 +173,60 @@ class SplitUploadCoordinator:
 
     def ensure_scene_folder(self, *, allow_fallback: bool = False) -> str | None:
         """Create StashDB-titled folder (or filename fallback) under the studio folder."""
-        self.sync_from_job()
-        if self._dest_folder_id:
+        lock = self._folder_lock() if self._folder_lock else nullcontext()
+        with lock:
+            self.sync_from_job()
+            if self._dest_folder_id:
+                dest = self._dest_folder_id
+            elif not self.studio_folder_id:
+                return None
+            else:
+                meta = self._meta()
+                scene_title = (meta.get("scene_title") or "").strip()
+                cover_path = meta.get("cover_path")
+                folder_title = scene_title or (self.fallback_name if allow_fallback else None)
+                if not folder_title:
+                    return None
+                label = (
+                    f"split upload: {scene_title} (StashDB)"
+                    if scene_title
+                    else f"split upload: {self.fallback_name}"
+                )
+                try:
+                    dest = filester_upload.prepare_split_scene_folder(
+                        parent_folder_id=self.studio_folder_id,
+                        folder_name=self.fallback_name,
+                        folder_title=folder_title,
+                        cover_image_path=cover_path if scene_title else None,
+                        blacklist_label=label,
+                        on_log=self._on_log,
+                    )
+                    self._save_dest(dest)
+                except Exception as exc:  # noqa: BLE001
+                    self.sync_from_job()
+                    if self._dest_folder_id:
+                        if self._on_log:
+                            self._on_log(
+                                "[Filester] Scene folder already created by parallel step; "
+                                "using existing folder"
+                            )
+                        dest = self._dest_folder_id
+                    else:
+                        if self._on_log:
+                            self._on_log(
+                                f"[Filester] Scene folder create failed "
+                                f"(upload continues in studio folder): {exc}"
+                            )
+                        return None
+        if dest:
             cover = self._meta().get("cover_path")
             if cover:
                 filester_upload.try_set_split_folder_thumbnail(
-                    self._dest_folder_id,
+                    dest,
                     cover,
                     on_log=self._on_log,
                 )
-            return self._dest_folder_id
-        if not self.studio_folder_id:
-            return None
-        meta = self._meta()
-        scene_title = (meta.get("scene_title") or "").strip()
-        cover_path = meta.get("cover_path")
-        folder_title = scene_title or (self.fallback_name if allow_fallback else None)
-        if not folder_title:
-            return None
-        label = (
-            f"split upload: {scene_title} (StashDB)"
-            if scene_title
-            else f"split upload: {self.fallback_name}"
-        )
-        try:
-            dest = filester_upload.prepare_split_scene_folder(
-                parent_folder_id=self.studio_folder_id,
-                folder_name=self.fallback_name,
-                folder_title=folder_title,
-                cover_image_path=cover_path if scene_title else None,
-                blacklist_label=label,
-                on_log=self._on_log,
-            )
-            self._save_dest(dest)
-            return dest
-        except Exception as exc:  # noqa: BLE001
-            if self._on_log:
-                self._on_log(
-                    f"[Filester] Scene folder create failed (upload continues in studio folder): "
-                    f"{exc}"
-                )
-            return None
+        return dest
 
     def upload_folder_for_part(self, part_index: int) -> str | None:
         self.sync_from_job()
@@ -222,6 +238,9 @@ class SplitUploadCoordinator:
         if part_index != 1 or not self.studio_folder_id:
             return
         dest = self.ensure_scene_folder(allow_fallback=True)
+        if not dest:
+            self.sync_from_job()
+            dest = self._dest_folder_id
         if not dest or dest == self.studio_folder_id:
             return
         filester_upload.move_upload_response_to_folder(raw, dest, on_log=self._on_log)
@@ -447,6 +466,7 @@ def _upload_filester_parts(
     preserve_split_artifacts: bool = False,
     get_split_meta=None,
     set_split_dest_folder_id=None,
+    folder_lock=None,
 ) -> tuple[list[UploadResult], str | None]:
     from downloader import TransferCancelled
 
@@ -533,12 +553,11 @@ def _upload_filester_parts(
         fallback_name=fallback_name,
         get_split_meta=get_split_meta,
         set_split_dest_folder_id=set_split_dest_folder_id,
+        folder_lock=folder_lock,
         resume_state=resume_state,
         resume_dir=resume_dir,
         on_log=on_log,
     )
-    split_coord.ensure_scene_folder(allow_fallback=False)
-
     if upload_folder_id and on_log:
         on_log(
             "[Filester] Progressive split: scene folder when StashDB is ready; "
@@ -657,6 +676,8 @@ def _upload_filester_parts(
                 on_log=on_log,
             )
             result = _normalize_filester(raw, part=part)
+            if split_progress is not None and part_count > 1 and part_index > 0:
+                split_progress.complete_part(part_index)
             split_coord.after_part_uploaded(part_index, raw)
             slug = filester_upload.file_identifier_from_response(raw)
             if resume_dir and result.ok and slug:
@@ -672,8 +693,6 @@ def _upload_filester_parts(
                     resume_state.total_parts = part_count
                     save_upload_resume_state(resume_dir, resume_state)
             results.append(result)
-            if split_progress is not None and part_count > 1 and part_index > 0:
-                split_progress.complete_part(part_index)
             if not part.get("is_source"):
                 try:
                     os.remove(part_path)
@@ -737,6 +756,7 @@ def upload_source(
     preserve_split_artifacts: bool = False,
     get_split_meta=None,
     set_split_dest_folder_id=None,
+    folder_lock=None,
 ) -> tuple[list[UploadResult], str | None, str | None]:
     """Upload a file or directory to all enabled/feasible providers.
 
@@ -805,6 +825,7 @@ def upload_source(
                 preserve_split_artifacts=preserve_split_artifacts,
                 get_split_meta=get_split_meta,
                 set_split_dest_folder_id=set_split_dest_folder_id,
+                folder_lock=folder_lock,
             )
             src_results.extend(fs_results)
             if effective_fs_folder:
