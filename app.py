@@ -353,15 +353,20 @@ def _maybe_prepare_filester_split_folder(job_id: str) -> None:
     source = (job.get("source_filename") or "upload").strip()
     stem, _ext = os.path.splitext(source)
     log_fn = lambda ln: _append_job_log(job_id, ln)
-    dest = prepare_split_scene_folder(
-        parent_folder_id=studio,
-        folder_name=stem or "upload",
-        folder_title=scene_title,
-        cover_image_path=job.get("stashdb_cover_path"),
-        blacklist_label=f"split upload: {scene_title} (StashDB)",
-        on_log=log_fn,
-    )
-    job["filester_split_dest_folder_id"] = dest
+    try:
+        dest = prepare_split_scene_folder(
+            parent_folder_id=studio,
+            folder_name=stem or "upload",
+            folder_title=scene_title,
+            cover_image_path=job.get("stashdb_cover_path"),
+            blacklist_label=f"split upload: {scene_title} (StashDB)",
+            on_log=log_fn,
+        )
+        job["filester_split_dest_folder_id"] = dest
+    except Exception as exc:  # noqa: BLE001
+        log_fn(
+            f"[Filester] Early scene folder create failed (will retry after part 1): {exc}"
+        )
 
 
 def _load_filester_folders():

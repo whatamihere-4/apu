@@ -540,6 +540,7 @@ def find_uploaded_file_in_folder(
     expected_size: int,
     *,
     size_tolerance: int = 0,
+    on_log=None,
 ) -> dict | None:
     """Return a folder file row when ``filename`` is present at ``expected_size``."""
     fid = (folder_id or "").strip()
@@ -547,13 +548,36 @@ def find_uploaded_file_in_folder(
         return None
     try:
         rows = list_folder_files(fid)
-    except requests.RequestException:
+    except requests.RequestException as exc:
+        if on_log:
+            on_log(f"[Filester] verify: folder listing failed for {fid[:12]}…: {exc}")
         return None
     for row in rows:
         if isinstance(row, dict) and _file_row_matches_upload(
             row, filename, expected_size, size_tolerance=size_tolerance
         ):
             return row
+    if on_log:
+        names = [
+            str(r.get("name") or "")
+            for r in rows
+            if isinstance(r, dict) and str(r.get("name") or "") == filename
+        ]
+        if names:
+            sizes = [
+                int(r.get("size") or 0)
+                for r in rows
+                if isinstance(r, dict) and str(r.get("name") or "") == filename
+            ]
+            on_log(
+                f"[Filester] verify: {filename!r} in folder but size mismatch "
+                f"(want {expected_size:,} bytes, saw {sizes!r})"
+            )
+        else:
+            on_log(
+                f"[Filester] verify: {filename!r} not in folder yet "
+                f"({len(rows)} file(s) listed)"
+            )
     return None
 
 
@@ -595,21 +619,29 @@ def _upload_post_once(
     should_cancel,
     should_restart=None,
     on_log=None,
+    bytes_sent_at: list[float | None] | None = None,
 ) -> requests.Response:
     """POST multipart upload; runs in a worker thread when verify recovery is enabled."""
     url = f"{FILESTER_BASE_URL}/api/v1/upload"
     last_log = [0.0]
     start_time = [time.time()]
-    bytes_complete_at = [None]
 
     def progress_callback(monitor):
         _check_upload_abort(should_cancel, should_restart)
         if (
-            bytes_complete_at[0] is None
+            bytes_sent_at is not None
+            and bytes_sent_at[0] is None
             and monitor.len
             and monitor.bytes_read >= monitor.len
         ):
-            bytes_complete_at[0] = time.time()
+            bytes_sent_at[0] = time.time()
+            msg = (
+                f"[Filester] {filename}: all upload bytes sent "
+                f"({format_size(monitor.len)}), waiting for server ACK…"
+            )
+            print(msg, flush=True)
+            if on_log:
+                on_log(msg)
         now = time.time()
         if now - last_log[0] < 1.0:
             return
@@ -658,6 +690,11 @@ def _wait_for_upload_response(
 ) -> requests.Response | dict:
     """Run upload POST with folder-listing recovery when the HTTP ACK hangs."""
     if not FILESTER_UPLOAD_VERIFY_ENABLED or not (folder_id or "").strip():
+        if on_log and not (folder_id or "").strip():
+            on_log(
+                f"[Filester] {filename}: upload verify disabled "
+                f"(no destination folder id)"
+            )
         return _upload_post_once(
             filepath,
             filename=filename,
@@ -669,18 +706,18 @@ def _wait_for_upload_response(
             on_log=on_log,
         )
 
+    if on_log:
+        on_log(
+            f"[Filester] {filename}: upload verify enabled "
+            f"(ACK wait {FILESTER_UPLOAD_VERIFY_AFTER_SEC}s, "
+            f"poll every {FILESTER_UPLOAD_VERIFY_POLL_SEC}s)"
+        )
+
     response_box: dict = {}
     error_box: dict = {}
-    bytes_complete_at: list[float | None] = [None]
+    bytes_sent_at: list[float | None] = [None]
     done = threading.Event()
-    last_status_log = [0.0]
-    verify_announced = [False]
-
-    def progress_with_bytes(pct, uploaded, total, speed, eta):
-        if total and uploaded >= total and bytes_complete_at[0] is None:
-            bytes_complete_at[0] = time.time()
-        if on_progress:
-            on_progress(pct, uploaded, total, speed, eta)
+    poll_count = [0]
 
     def worker() -> None:
         try:
@@ -689,10 +726,11 @@ def _wait_for_upload_response(
                 filename=filename,
                 filesize=filesize,
                 folder_id=folder_id,
-                on_progress=progress_with_bytes,
+                on_progress=on_progress,
                 should_cancel=should_cancel,
                 should_restart=should_restart,
                 on_log=on_log,
+                bytes_sent_at=bytes_sent_at,
             )
         except Exception as exc:  # noqa: BLE001
             error_box["error"] = exc
@@ -705,24 +743,41 @@ def _wait_for_upload_response(
     poll = FILESTER_UPLOAD_VERIFY_POLL_SEC
     verify_after = FILESTER_UPLOAD_VERIFY_AFTER_SEC
     max_verify = FILESTER_UPLOAD_VERIFY_MAX_SEC
+    last_send_log = [0.0]
+    verify_wait_logged = [False]
 
     while not done.wait(timeout=poll):
         _check_upload_abort(should_cancel, should_restart)
         if error_box:
             raise error_box["error"]
-        completed_at = bytes_complete_at[0]
-        if completed_at is None:
+        sent_at = bytes_sent_at[0]
+        now = time.time()
+        if sent_at is None:
+            if on_log and now - last_send_log[0] >= poll:
+                last_send_log[0] = now
+                on_log(f"[Filester] {filename}: still sending upload bytes…")
             continue
-        elapsed = time.time() - completed_at
+        elapsed = now - sent_at
         if elapsed < verify_after:
+            if on_log and not verify_wait_logged[0]:
+                verify_wait_logged[0] = True
+                on_log(
+                    f"[Filester] {filename}: bytes sent, waiting {verify_after}s "
+                    f"before folder verify…"
+                )
             continue
-        if on_log and not verify_announced[0]:
-            verify_announced[0] = True
+        poll_count[0] += 1
+        if on_log:
             on_log(
-                f"[Filester] {filename}: all bytes sent; no upload ACK after "
-                f"{verify_after}s — polling folder for completed file"
+                f"[Filester] verify poll #{poll_count[0]} for {filename!r} "
+                f"({int(elapsed)}s since bytes sent)…"
             )
-        row = find_uploaded_file_in_folder(folder_id, filename, filesize)
+        row = find_uploaded_file_in_folder(
+            folder_id,
+            filename,
+            filesize,
+            on_log=on_log,
+        )
         if row:
             msg = (
                 f"[Filester] {filename}: verified in folder after {int(elapsed)}s "
@@ -736,12 +791,6 @@ def _wait_for_upload_response(
             raise RuntimeError(
                 f"Filester upload ACK hung for {filename!r} and file not found in folder "
                 f"after {int(elapsed)}s (verify max {max_verify}s)"
-            )
-        if on_log and elapsed - last_status_log[0] >= 60:
-            last_status_log[0] = elapsed
-            on_log(
-                f"[Filester] {filename}: still waiting for upload ACK "
-                f"({int(elapsed)}s since bytes sent; polling folder…)"
             )
 
     if error_box:

@@ -79,9 +79,9 @@ class UploadVerifyRecoveryTests(unittest.TestCase):
 
         def slow_post(*_a, **kwargs):
             started.set()
-            on_progress = kwargs.get("on_progress")
-            if on_progress:
-                on_progress(100.0, 123, 123, 0, 0)
+            bytes_sent_at = kwargs.get("bytes_sent_at")
+            if bytes_sent_at is not None:
+                bytes_sent_at[0] = time.time()
             time.sleep(30)
             resp = MagicMock()
             resp.status_code = 200

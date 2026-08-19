@@ -193,16 +193,24 @@ class SplitUploadCoordinator:
             if scene_title
             else f"split upload: {self.fallback_name}"
         )
-        dest = filester_upload.prepare_split_scene_folder(
-            parent_folder_id=self.studio_folder_id,
-            folder_name=self.fallback_name,
-            folder_title=folder_title,
-            cover_image_path=cover_path if scene_title else None,
-            blacklist_label=label,
-            on_log=self._on_log,
-        )
-        self._save_dest(dest)
-        return dest
+        try:
+            dest = filester_upload.prepare_split_scene_folder(
+                parent_folder_id=self.studio_folder_id,
+                folder_name=self.fallback_name,
+                folder_title=folder_title,
+                cover_image_path=cover_path if scene_title else None,
+                blacklist_label=label,
+                on_log=self._on_log,
+            )
+            self._save_dest(dest)
+            return dest
+        except Exception as exc:  # noqa: BLE001
+            if self._on_log:
+                self._on_log(
+                    f"[Filester] Scene folder create failed (upload continues in studio folder): "
+                    f"{exc}"
+                )
+            return None
 
     def upload_folder_for_part(self, part_index: int) -> str | None:
         self.sync_from_job()
