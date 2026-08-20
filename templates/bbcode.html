@@ -334,7 +334,7 @@
           <div class="image-meta" id="image-meta"></div>
           <div class="image-tools">
             <a class="btn secondary" id="open-original" target="_blank" rel="noopener">Open original</a>
-            <a class="btn" id="download-png">Download image</a>
+            <button type="button" class="btn" id="download-png" disabled>Download image</button>
             <button class="btn secondary" type="button" id="image-next">Next image</button>
             <button class="btn" type="button" id="download-both-png" disabled title="StashDB cover + thumbnail sheet">Download both</button>
           </div>
@@ -747,15 +747,33 @@
       if (activeDraftId) activeSceneId = "";
     }
 
+    function stashIdsFromLink(url) {
+      const text = String(url || "").trim();
+      const mScene = text.match(/stashdb\.org\/scenes\/([a-f0-9-]+)/i);
+      if (mScene) return { scene_id: mScene[1] };
+      const mDraft = text.match(/stashdb\.org\/drafts\/([a-f0-9-]+)/i);
+      if (mDraft) return { draft_id: mDraft[1] };
+      return {};
+    }
+
     function hasStashImageResource() {
-      return !!(activeSceneId || activeDraftId);
+      if (activeSceneId || activeDraftId) return true;
+      const parsed = stashIdsFromLink(stashdbLinkEl.value);
+      return !!(parsed.scene_id || parsed.draft_id);
     }
 
     function stashImageDownloadQuery(index) {
-      if (!hasStashImageResource()) return "";
+      let sceneId = activeSceneId;
+      let draftId = activeDraftId;
+      if (!sceneId && !draftId) {
+        const parsed = stashIdsFromLink(stashdbLinkEl.value);
+        sceneId = parsed.scene_id || "";
+        draftId = parsed.draft_id || "";
+      }
+      if (!sceneId && !draftId) return "";
       const q = new URLSearchParams({ index: String(index) });
-      if (activeSceneId) q.set("scene_id", activeSceneId);
-      else q.set("draft_id", activeDraftId);
+      if (sceneId) q.set("scene_id", sceneId);
+      else q.set("draft_id", draftId);
       return q.toString();
     }
 
@@ -1463,35 +1481,78 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]${filesterMergeFooter}`;
       thumbSheetImgEl.src = url;
     }
 
+    function filenameFromContentDisposition(header, fallback) {
+      if (!header) return fallback;
+      const star = /filename\*=UTF-8''([^;]+)/i.exec(header);
+      if (star) return decodeURIComponent(star[1].trim());
+      const plain = /filename="?([^";]+)"?/i.exec(header);
+      if (plain) return plain[1].trim();
+      return fallback;
+    }
+
+    async function downloadUrlAsFile(url, fallbackName) {
+      const r = await fetch(url);
+      if (!r.ok) {
+        let detail = `HTTP ${r.status}`;
+        try {
+          const err = await r.json();
+          if (err && err.error) detail = err.error;
+        } catch (_e) { /* not JSON */ }
+        throw new Error(detail);
+      }
+      const blob = await r.blob();
+      const name = filenameFromContentDisposition(
+        r.headers.get("Content-Disposition"),
+        fallbackName || "download",
+      );
+      const objectUrl = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = objectUrl;
+      a.download = name;
+      a.rel = "noopener";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+    }
+
+    async function downloadStashCoverImage() {
+      const q = stashImageDownloadQuery(imageIndex);
+      if (!q) throw new Error("No StashDB scene or draft loaded");
+      const label = stashImageResourceLabel();
+      await downloadUrlAsFile(
+        `/api/stashdb_scene_image?${q}`,
+        `${label}_${imageIndex}.jpg`,
+      );
+    }
+
     async function downloadBothPngs() {
       const q = stashImageDownloadQuery(imageIndex);
-      if (!q) return;
-      const stash = `/api/stashdb_scene_image?${q}`;
-      const go = (href, name) => {
-        const a = document.createElement("a");
-        a.href = href;
-        a.rel = "noopener";
-        if (name) a.setAttribute("download", name);
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-      };
+      if (!q) {
+        helperStatusEl.className = "err";
+        helperStatusEl.textContent = "No StashDB scene or draft loaded.";
+        return;
+      }
       helperStatusEl.className = "";
       helperStatusEl.textContent = "";
-      go(stash);
-      if (thumbSheetAvailable && thumbSheetUrl(true)) {
-        await new Promise((r) => setTimeout(r, 450));
-        go(thumbSheetUrl(true), thumbSheetBasename());
-      }
-      if (!resolveSlrPreviewCode()) return;
-      await new Promise((r) => setTimeout(r, 450));
       try {
+        await downloadStashCoverImage();
+        if (thumbSheetAvailable && thumbSheetUrl(true)) {
+          await new Promise((r) => setTimeout(r, 450));
+          await downloadUrlAsFile(thumbSheetUrl(true), thumbSheetBasename());
+        }
+        if (!resolveSlrPreviewCode()) {
+          helperStatusEl.className = "ok";
+          helperStatusEl.textContent = "Downloads started.";
+          return;
+        }
+        await new Promise((r) => setTimeout(r, 450));
         await downloadSlrPreviewGif(resolveSlrPreviewCode());
         helperStatusEl.className = "ok";
         helperStatusEl.textContent = "Downloads started (incl. SLR GIF).";
       } catch (e) {
         helperStatusEl.className = "err";
-        helperStatusEl.textContent = "SLR GIF failed: " + (e && e.message ? e.message : e);
+        helperStatusEl.textContent = "Download failed: " + (e && e.message ? e.message : e);
       }
     }
 
@@ -1510,16 +1571,9 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]${filesterMergeFooter}`;
       imageMetaEl.textContent = `Image ${imageIndex + 1} / ${sceneImages.length}` +
                                 (dims ? `  ·  ${dims}` : "");
       openOriginalEl.href = img.url;
-      const q = stashImageDownloadQuery(imageIndex);
-      if (q) {
-        downloadPngEl.href = `/api/stashdb_scene_image?${q}`;
-        downloadPngEl.removeAttribute("download");
-        downloadBothBtn.disabled = false;
-      } else {
-        downloadPngEl.href = img.url;
-        downloadPngEl.setAttribute("download", `${stashImageResourceLabel()}_${imageIndex}`);
-        downloadBothBtn.disabled = true;
-      }
+      const canDownload = hasStashImageResource() && sceneImages.length > 0;
+      downloadPngEl.disabled = !canDownload;
+      downloadBothBtn.disabled = !canDownload;
       refreshSlrGifControls();
     }
 
@@ -1929,6 +1983,12 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]${filesterMergeFooter}`;
     addActressBtn.addEventListener("click", () => addActressRow());
     copyBtn.addEventListener("click", copyToClipboard);
     downloadBothBtn.addEventListener("click", () => { void downloadBothPngs(); });
+    downloadPngEl.addEventListener("click", () => {
+      void downloadStashCoverImage().catch((e) => {
+        helperStatusEl.className = "err";
+        helperStatusEl.textContent = "Download failed: " + (e && e.message ? e.message : e);
+      });
+    });
     if (slrGifDownloadBtn) {
       slrGifDownloadBtn.addEventListener("click", () => {
         void downloadSlrPreviewGif().catch((e) => {

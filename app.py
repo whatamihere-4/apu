@@ -2934,6 +2934,31 @@ def _stashdb_cover_extension(url: str, content_type: str | None) -> str:
     return ".jpg"
 
 
+def _stashdb_fetch_image_url(url: str) -> tuple[bytes, str, str]:
+    """Download image bytes from a StashDB CDN URL. Returns (content, content_type, ext)."""
+    headers = {}
+    if STASHDB_API_KEY:
+        headers["ApiKey"] = STASHDB_API_KEY
+    try:
+        r = requests.get(url, timeout=30, headers=headers)
+        r.raise_for_status()
+    except requests.RequestException as e:
+        raise RuntimeError(f"Failed to fetch image from StashDB: {e}") from e
+    content_type = (r.headers.get("content-type") or "").split(";")[0].strip().lower()
+    if not content_type.startswith("image/"):
+        snippet = r.content[:160].decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"StashDB did not return an image (content-type={content_type!r}); "
+            f"response starts with: {snippet!r}"
+        )
+    if len(r.content) > _STASHDB_COVER_MAX_BYTES:
+        raise ValueError(
+            f"Image too large ({len(r.content):,} bytes); max {_STASHDB_COVER_MAX_BYTES:,}"
+        )
+    ext = _stashdb_cover_extension(url, content_type)
+    return r.content, content_type, ext
+
+
 def _stashdb_download_cover(scene_id: str, cache_dir: str) -> str | None:
     """Download the largest StashDB scene image for a folder thumbnail."""
     image_url = _stashdb_largest_image_url_for_scene_id(scene_id)
@@ -2941,20 +2966,10 @@ def _stashdb_download_cover(scene_id: str, cache_dir: str) -> str | None:
         return None
     os.makedirs(cache_dir, exist_ok=True)
     try:
-        resp = requests.get(image_url, timeout=30)
-        resp.raise_for_status()
-        content = resp.content
-        content_type = resp.headers.get("content-type")
-    except requests.RequestException as exc:
+        content, content_type, ext = _stashdb_fetch_image_url(image_url)
+    except (RuntimeError, ValueError) as exc:
         print(f"[STASHDB] cover download failed: {exc}", flush=True)
         return None
-    if len(content) > _STASHDB_COVER_MAX_BYTES:
-        print(
-            f"[STASHDB] cover too large ({len(content):,} bytes); skipping thumbnail",
-            flush=True,
-        )
-        return None
-    ext = _stashdb_cover_extension(image_url, content_type)
     dest = os.path.join(cache_dir, f"{scene_id}{ext}")
     try:
         with open(dest, "wb") as fp:
@@ -5753,18 +5768,7 @@ def _stashdb_stash_image_bytes(
     if index < 0 or index >= len(images):
         raise ValueError(f"index out of range (0..{len(images)-1})")
     src_url = images[index]["url"]
-    try:
-        r = requests.get(src_url, timeout=30, stream=False)
-        r.raise_for_status()
-    except requests.RequestException as e:
-        raise RuntimeError(f"Failed to fetch image from StashDB: {e}") from e
-    content_type = (r.headers.get("content-type") or "").split(";")[0].strip()
-    ext = _stashdb_cover_extension(src_url, content_type)
-    if len(r.content) > _STASHDB_COVER_MAX_BYTES:
-        raise ValueError(
-            f"Image too large ({len(r.content):,} bytes); max {_STASHDB_COVER_MAX_BYTES:,}"
-        )
-    return r.content, content_type, ext
+    return _stashdb_fetch_image_url(src_url)
 
 
 def _stashdb_scene_cover_png_bytes(scene_id: str, index: int = 0) -> bytes:
