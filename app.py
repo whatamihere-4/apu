@@ -83,6 +83,9 @@ def _env_yes(name: str, *, default: str = "1") -> bool:
 
 
 DOWNLOADS_DIR = "/downloads"
+# Link jobs keep failed downloads on disk by default so upload watchdog / resume can retry
+# without re-downloading. Set 1 to delete the file on failure (frees disk for queued jobs).
+DELETE_FAILED_DOWNLOADS = _env_yes("DELETE_FAILED_DOWNLOADS", default="0")
 
 
 def _downloads_mount_rel(full_path: str) -> str:
@@ -6538,6 +6541,40 @@ def _restore_interrupted_upload_on_startup() -> int:
 
 # ── Upload endpoints ─────────────────────────────────────────────────
 
+def _handle_failed_link_download(
+    job_id: str,
+    downloaded_path: str | None,
+) -> None:
+    """Keep or delete a link-job download after failure (see DELETE_FAILED_DOWNLOADS)."""
+    if not downloaded_path or not os.path.exists(downloaded_path):
+        if not _is_cancelled(job_id):
+            _append_job_log(
+                job_id,
+                "No partial download file on disk (failed before save or already cleaned).",
+            )
+        return
+    if _is_video_file(downloaded_path):
+        _join_parallel_upload_sidecars(job_id, timeout=30.0)
+    if _is_cancelled(job_id):
+        return
+    basename = os.path.basename(downloaded_path)
+    if DELETE_FAILED_DOWNLOADS:
+        try:
+            os.remove(downloaded_path)
+            print(f"[CLEANUP] Deleted failed download {downloaded_path}", flush=True)
+            _append_job_log(job_id, f"Deleted failed download: {basename}")
+        except OSError as e:
+            _append_job_log(
+                job_id,
+                f"Could not delete failed download {basename}: {e}",
+            )
+    else:
+        _append_job_log(
+            job_id,
+            f"Keeping file on disk for retry/resume: {basename}",
+        )
+
+
 def _start_link_job(url, folder_id=None, *, job_id=None, resume_upload=False):
     """Create + enqueue a download-then-upload job for ``url``. Returns job_id."""
     url = (url or "").strip()
@@ -6677,20 +6714,7 @@ def _start_link_job(url, folder_id=None, *, job_id=None, resume_upload=False):
                     job_id,
                     resume_dir=resume_dir,
                 )
-            if downloaded_path and os.path.exists(downloaded_path):
-                if _is_video_file(downloaded_path):
-                    _join_parallel_upload_sidecars(job_id, timeout=30.0)
-                if not _is_cancelled(job_id):
-                    _append_job_log(
-                        job_id,
-                        f"Keeping file on disk for retry/resume: "
-                        f"{os.path.basename(downloaded_path)}",
-                    )
-            elif not _is_cancelled(job_id):
-                _append_job_log(
-                    job_id,
-                    "No partial download file on disk (failed before save or already cleaned).",
-                )
+            _handle_failed_link_download(job_id, downloaded_path)
 
     _enqueue(job_id, _worker)
     return job_id
