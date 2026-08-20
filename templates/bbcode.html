@@ -183,7 +183,7 @@
       opacity: 0.45;
       cursor: not-allowed;
     }
-    select {
+    select, .cached-file-trigger {
       width: 100%;
       border: 1px solid var(--border);
       border-radius: 6px;
@@ -194,7 +194,66 @@
       outline: none;
       font-family: inherit;
     }
-    select:focus { border-color: var(--accent); }
+    select:focus, .cached-file-trigger:focus { border-color: var(--accent); }
+    .cached-file-picker { position: relative; flex: 1; min-width: 0; }
+    .cached-file-trigger {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.5rem;
+      text-align: left;
+      cursor: pointer;
+    }
+    .cached-file-trigger:hover { border-color: var(--accent); }
+    .cached-file-trigger-label {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .cached-file-trigger::after {
+      content: "▾";
+      color: var(--muted);
+      font-size: 0.75rem;
+      flex-shrink: 0;
+    }
+    .cached-file-menu {
+      display: none;
+      position: absolute;
+      z-index: 30;
+      left: 0;
+      right: 0;
+      top: calc(100% + 4px);
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+      flex-direction: column;
+      max-height: 320px;
+    }
+    .cached-file-menu.is-open { display: flex; }
+    .cached-file-filter {
+      width: 100%;
+      border: 0;
+      border-bottom: 1px solid var(--border);
+      border-radius: 6px 6px 0 0;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 0.85rem;
+      padding: 0.5rem 0.75rem;
+      outline: none;
+      font-family: inherit;
+    }
+    .cached-file-filter:focus { border-color: var(--accent); }
+    .cached-file-options { overflow-y: auto; max-height: 260px; }
+    .cached-file-option {
+      padding: 0.45rem 0.75rem;
+      cursor: pointer;
+      font-size: 0.85rem;
+      user-select: none;
+    }
+    .cached-file-option:hover,
+    .cached-file-option.is-active { background: rgba(109, 93, 252, 0.12); }
+    .cached-file-option.is-selected { background: rgba(109, 93, 252, 0.22); }
     .file-list .file-item {
       display: flex;
       justify-content: space-between;
@@ -240,9 +299,15 @@
         <div class="field">
           <label for="cached-file-select">Cached file (scenes.json)</label>
           <div class="row">
-            <select id="cached-file-select">
-              <option value="">— none —</option>
-            </select>
+            <div class="cached-file-picker" id="cached-file-picker">
+              <button type="button" class="cached-file-trigger" id="cached-file-select" aria-haspopup="listbox" aria-expanded="false">
+                <span class="cached-file-trigger-label" id="cached-file-label">— none —</span>
+              </button>
+              <div class="cached-file-menu" id="cached-file-menu">
+                <input type="search" class="cached-file-filter" id="cached-file-filter" placeholder="Filter files…" autocomplete="off">
+                <div class="cached-file-options" id="cached-file-options" role="listbox"></div>
+              </div>
+            </div>
             <button type="button" class="btn secondary" id="cached-file-refresh" title="Reload list from scenes.json">Refresh</button>
             <button type="button" class="btn secondary" id="cached-file-browse">Browse</button>
           </div>
@@ -269,9 +334,9 @@
           <div class="image-meta" id="image-meta"></div>
           <div class="image-tools">
             <a class="btn secondary" id="open-original" target="_blank" rel="noopener">Open original</a>
-            <a class="btn" id="download-png">Download PNG</a>
+            <a class="btn" id="download-png">Download image</a>
             <button class="btn secondary" type="button" id="image-next">Next image</button>
-            <button class="btn" type="button" id="download-both-png" disabled title="StashDB cover PNG + thumbnail sheet">Download both PNGs</button>
+            <button class="btn" type="button" id="download-both-png" disabled title="StashDB cover + thumbnail sheet">Download both</button>
           </div>
         </div>
 
@@ -426,6 +491,8 @@
     };
     let activeFilename = (PAGE_DATA.filename || "").trim();
     let activeSceneId = (PAGE_DATA.sceneId || "").trim();
+    let activeDraftId = "";
+    let sceneImages = [];
     let splitState = {
       parts: parseInt(PAGE_DATA.splitParts, 10) || 0,
       basename: (PAGE_DATA.splitName || "").trim(),
@@ -458,11 +525,20 @@
     const thumbSheetImgEl = document.getElementById("thumb-sheet-img");
     const thumbSheetMissingEl = document.getElementById("thumb-sheet-missing");
     const downloadThumbPngEl = document.getElementById("download-thumb-png");
+    const cachedFilePickerEl = document.getElementById("cached-file-picker");
     const cachedFileSelectEl = document.getElementById("cached-file-select");
+    const cachedFileLabelEl = document.getElementById("cached-file-label");
+    const cachedFileMenuEl = document.getElementById("cached-file-menu");
+    const cachedFileFilterEl = document.getElementById("cached-file-filter");
+    const cachedFileOptionsEl = document.getElementById("cached-file-options");
     const cachedFileRefreshBtn = document.getElementById("cached-file-refresh");
     const cachedFileBrowseBtn = document.getElementById("cached-file-browse");
     const downloadsFileListEl = document.getElementById("downloads-file-list");
     const cachedFileHintEl = document.getElementById("cached-file-hint");
+    const NONE_FILE_LABEL = "— none —";
+    let cachedFileSelectValue = "";
+    let cachedFilesList = [];
+    let cachedFileHighlight = 0;
     const stashdbAutofillBtn = document.getElementById("stashdb-autofill-btn");
     const stashdbStatusEl = document.getElementById("stashdb-status");
     const slrSceneLinkEl = document.getElementById("slr-scene-link");
@@ -568,9 +644,93 @@
       window.history.replaceState(null, "", next);
     }
 
+    function cachedFileOptionLabel(f) {
+      if (!f || !f.filename) return NONE_FILE_LABEL;
+      let tag = "";
+      if (f.scene_id) tag = " · scene";
+      else if (f.edit_id) tag = " · edit";
+      else if (f.draft_id) tag = " · draft";
+      return f.filename + tag;
+    }
+
+    function isCachedFileMenuOpen() {
+      return cachedFileMenuEl && cachedFileMenuEl.classList.contains("is-open");
+    }
+
+    function updateCachedFileTriggerLabel() {
+      if (!cachedFileLabelEl) return;
+      const meta = cachedFileSelectValue ? cachedFileByName.get(cachedFileSelectValue) : null;
+      cachedFileLabelEl.textContent = meta
+        ? cachedFileOptionLabel(meta)
+        : (cachedFileSelectValue || NONE_FILE_LABEL);
+    }
+
+    function setCachedFileSelectValue(name) {
+      cachedFileSelectValue = (name || "").trim();
+      updateCachedFileTriggerLabel();
+      if (isCachedFileMenuOpen()) renderCachedFileOptions(cachedFileFilterEl.value);
+    }
+
+    function closeCachedFileMenu() {
+      if (!cachedFileMenuEl) return;
+      cachedFileMenuEl.classList.remove("is-open");
+      if (cachedFileSelectEl) cachedFileSelectEl.setAttribute("aria-expanded", "false");
+    }
+
+    function renderCachedFileOptions(filter) {
+      if (!cachedFileOptionsEl) return;
+      const q = String(filter || "").trim().toLowerCase();
+      const items = [];
+      if (!q || NONE_FILE_LABEL.toLowerCase().includes(q)) {
+        items.push({ filename: "", label: NONE_FILE_LABEL });
+      }
+      for (const f of cachedFilesList) {
+        const label = cachedFileOptionLabel(f);
+        if (q && !f.filename.toLowerCase().includes(q) && !label.toLowerCase().includes(q)) {
+          continue;
+        }
+        items.push({ filename: f.filename, label });
+      }
+      cachedFileOptionsEl.innerHTML = items.length
+        ? items.map((item) => {
+            const selected = (item.filename || "") === cachedFileSelectValue;
+            return (
+              `<div class="cached-file-option${selected ? " is-selected" : ""}" role="option"` +
+              ` data-name="${escAttr(item.filename)}" aria-selected="${selected}">` +
+              `${escHtml(item.label)}</div>`
+            );
+          }).join("")
+        : '<div class="cached-file-option" style="color:var(--muted);cursor:default;">No matches</div>';
+      const opts = [...cachedFileOptionsEl.querySelectorAll(".cached-file-option[data-name]")];
+      cachedFileHighlight = Math.max(0, opts.findIndex((el) => el.classList.contains("is-selected")));
+      if (opts[cachedFileHighlight]) opts[cachedFileHighlight].classList.add("is-active");
+    }
+
+    function moveCachedFileHighlight(delta) {
+      const opts = [...cachedFileOptionsEl.querySelectorAll(".cached-file-option[data-name]")];
+      if (!opts.length) return;
+      cachedFileHighlight = (cachedFileHighlight + delta + opts.length) % opts.length;
+      opts.forEach((el, i) => el.classList.toggle("is-active", i === cachedFileHighlight));
+      opts[cachedFileHighlight].scrollIntoView({ block: "nearest" });
+    }
+
+    function pickCachedFile(name) {
+      closeCachedFileMenu();
+      void applyCachedFileSelection(name || "");
+    }
+
+    function openCachedFileMenu() {
+      if (!cachedFileMenuEl) return;
+      cachedFileFilterEl.value = "";
+      renderCachedFileOptions("");
+      cachedFileMenuEl.classList.add("is-open");
+      cachedFileSelectEl.setAttribute("aria-expanded", "true");
+      cachedFileFilterEl.focus();
+    }
+
     function setActiveFilename(name, opts = {}) {
       activeFilename = (name || "").trim();
-      if (cachedFileSelectEl) cachedFileSelectEl.value = activeFilename;
+      setCachedFileSelectValue(activeFilename);
       updateFilenamePill();
       setupThumbSheet();
       if (opts.syncUrl !== false) syncUrlParams();
@@ -578,7 +738,29 @@
 
     function setActiveSceneId(id, opts = {}) {
       activeSceneId = (id || "").trim();
+      if (activeSceneId) activeDraftId = "";
       if (opts.syncUrl !== false) syncUrlParams();
+    }
+
+    function setActiveDraftId(id) {
+      activeDraftId = (id || "").trim();
+      if (activeDraftId) activeSceneId = "";
+    }
+
+    function hasStashImageResource() {
+      return !!(activeSceneId || activeDraftId);
+    }
+
+    function stashImageDownloadQuery(index) {
+      if (!hasStashImageResource()) return "";
+      const q = new URLSearchParams({ index: String(index) });
+      if (activeSceneId) q.set("scene_id", activeSceneId);
+      else q.set("draft_id", activeDraftId);
+      return q.toString();
+    }
+
+    function stashImageResourceLabel() {
+      return activeSceneId || activeDraftId || "stashdb";
     }
 
     function escAttr(value) {
@@ -1187,14 +1369,14 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]${filesterMergeFooter}`;
     function refreshSlrGifControls() {
       const code = resolveSlrPreviewCode();
       if (slrGifDownloadBtn) slrGifDownloadBtn.disabled = !code;
-      if (downloadBothBtn && activeSceneId) {
+      if (downloadBothBtn && hasStashImageResource()) {
         if (code) {
-          downloadBothBtn.textContent = "Download PNGs + SLR GIF";
+          downloadBothBtn.textContent = "Download all";
           downloadBothBtn.title =
-            "Cover PNG, thumbnail sheet (if ready), and SLR VR preview as GIF (fetched on click).";
+            "Cover image, thumbnail sheet (if ready), and SLR VR preview as GIF (fetched on click).";
         } else {
-          downloadBothBtn.textContent = "Download both PNGs";
-          downloadBothBtn.title = "StashDB cover PNG + thumbnail sheet";
+          downloadBothBtn.textContent = "Download both";
+          downloadBothBtn.title = "StashDB cover + thumbnail sheet";
         }
       }
     }
@@ -1282,8 +1464,9 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]${filesterMergeFooter}`;
     }
 
     async function downloadBothPngs() {
-      if (!activeSceneId) return;
-      const stash = `/api/stashdb_scene_image_png?scene_id=${encodeURIComponent(activeSceneId)}&index=${imageIndex}`;
+      const q = stashImageDownloadQuery(imageIndex);
+      if (!q) return;
+      const stash = `/api/stashdb_scene_image?${q}`;
       const go = (href, name) => {
         const a = document.createElement("a");
         a.href = href;
@@ -1295,7 +1478,7 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]${filesterMergeFooter}`;
       };
       helperStatusEl.className = "";
       helperStatusEl.textContent = "";
-      go(stash, `${activeSceneId}_${imageIndex}.png`);
+      go(stash);
       if (thumbSheetAvailable && thumbSheetUrl(true)) {
         await new Promise((r) => setTimeout(r, 450));
         go(thumbSheetUrl(true), thumbSheetBasename());
@@ -1327,11 +1510,17 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]${filesterMergeFooter}`;
       imageMetaEl.textContent = `Image ${imageIndex + 1} / ${sceneImages.length}` +
                                 (dims ? `  ·  ${dims}` : "");
       openOriginalEl.href = img.url;
-      const pngHref = `/api/stashdb_scene_image_png?scene_id=${encodeURIComponent(activeSceneId)}` +
-                      `&index=${imageIndex}`;
-      downloadPngEl.href = pngHref;
-      downloadPngEl.setAttribute("download", `${activeSceneId}_${imageIndex}.png`);
-      downloadBothBtn.disabled = false;
+      const q = stashImageDownloadQuery(imageIndex);
+      if (q) {
+        downloadPngEl.href = `/api/stashdb_scene_image?${q}`;
+        downloadPngEl.removeAttribute("download");
+        downloadBothBtn.disabled = false;
+      } else {
+        downloadPngEl.href = img.url;
+        downloadPngEl.setAttribute("download", `${stashImageResourceLabel()}_${imageIndex}`);
+        downloadBothBtn.disabled = true;
+      }
+      refreshSlrGifControls();
     }
 
     async function loadScene() {
@@ -1513,22 +1702,11 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]${filesterMergeFooter}`;
         const data = await r.json();
         if (!r.ok || data.error) throw new Error(data.error || `HTTP ${r.status}`);
         cachedFileByName.clear();
-        const files = data.files || [];
-        cachedFileSelectEl.innerHTML = '<option value="">— none —</option>';
-        for (const f of files) {
-          cachedFileByName.set(f.filename, f);
-          const opt = document.createElement("option");
-          opt.value = f.filename;
-          let tag = "";
-          if (f.scene_id) tag = " · scene";
-          else if (f.edit_id) tag = " · edit";
-          else if (f.draft_id) tag = " · draft";
-          opt.textContent = f.filename + tag;
-          cachedFileSelectEl.appendChild(opt);
-        }
-        if (selectName) cachedFileSelectEl.value = selectName;
-        cachedFileHintEl.textContent = files.length
-          ? `${files.length} file(s) documented in scenes.json`
+        cachedFilesList = data.files || [];
+        for (const f of cachedFilesList) cachedFileByName.set(f.filename, f);
+        setCachedFileSelectValue(selectName || cachedFileSelectValue);
+        cachedFileHintEl.textContent = cachedFilesList.length
+          ? `${cachedFilesList.length} file(s) documented in scenes.json`
           : "No cached files yet — hash a download first.";
       } catch (err) {
         cachedFileHintEl.textContent = "Could not load cache list: " + (err.message || err);
@@ -1542,6 +1720,8 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]${filesterMergeFooter}`;
       if (!fn) {
         if (!opts.keepScene) {
           setActiveSceneId("", opts);
+          setActiveDraftId("");
+          sceneImages = [];
           await loadScene();
         }
         return;
@@ -1680,20 +1860,39 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]${filesterMergeFooter}`;
         studioFolderUrl = (data.studio_folder_url || data.gallery_link || "").trim();
         studioFolderFilesterUrl = (data.filester_gallery_link || "").trim();
         studioLinkLabel = String(data.studio_link_label || "").trim();
-        if (data.image_bbcode) {
-          fields["image-bbcode"].value = sanitizeImageBbcodeInput(data.image_bbcode);
-        }
         if (data.scene_url) stashdbLinkEl.value = data.scene_url;
         else if (data.scene_id) {
           stashdbLinkEl.value = `${PAGE_DATA.stashdbScenesBase}/${data.scene_id}`;
+        } else if (data.draft_id) {
+          stashdbLinkEl.value = `https://stashdb.org/drafts/${data.draft_id}`;
         }
         if (data.scene_id) {
+          setActiveDraftId("");
           setActiveSceneId(data.scene_id);
           await loadScene();
-        } else if (data.studio) {
-          await applyStudioResolution(data.studio, {
-            network: data.network_studio || "",
-          });
+        } else {
+          setActiveSceneId("", { syncUrl: false });
+          const draftId = data.draft_id || (data.source === "draft" ? data.id : "") || "";
+          setActiveDraftId(draftId);
+          if (Array.isArray(data.images) && data.images.length) {
+            sceneImages = data.images;
+            showSceneImage(0);
+            const title = (data.title || "").trim() || "(no title)";
+            const draftUrl = draftId ? `https://stashdb.org/drafts/${draftId}` : stashdbLinkEl.value.trim();
+            if (draftUrl) {
+              sceneMetaEl.innerHTML =
+                `<a href="${escAttr(draftUrl)}" target="_blank" rel="noopener">${escHtml(title)}</a>` +
+                `<span> · draft</span>`;
+            }
+          } else {
+            sceneImages = [];
+            showSceneImage(0);
+          }
+          if (data.studio) {
+            await applyStudioResolution(data.studio, {
+              network: data.network_studio || "",
+            });
+          }
         }
         try {
           await persistStashdbLinkFromAutofill(data);
@@ -1741,11 +1940,57 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]${filesterMergeFooter}`;
     if (slrSceneLinkEl) {
       slrSceneLinkEl.addEventListener("input", refreshSlrGifControls);
     }
-    cachedFileSelectEl.addEventListener("change", () => {
-      void applyCachedFileSelection(cachedFileSelectEl.value);
+    cachedFileSelectEl.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (isCachedFileMenuOpen()) closeCachedFileMenu();
+      else openCachedFileMenu();
+    });
+    cachedFileFilterEl.addEventListener("input", () => {
+      renderCachedFileOptions(cachedFileFilterEl.value);
+    });
+    cachedFileFilterEl.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        closeCachedFileMenu();
+        cachedFileSelectEl.focus();
+      } else if (e.key === "ArrowDown") {
+        e.preventDefault();
+        moveCachedFileHighlight(1);
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        moveCachedFileHighlight(-1);
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        const opts = [...cachedFileOptionsEl.querySelectorAll(".cached-file-option[data-name]")];
+        const el = opts[cachedFileHighlight] || opts[0];
+        if (el) pickCachedFile(el.dataset.name || "");
+      }
+    });
+    cachedFileOptionsEl.addEventListener("mousedown", (e) => {
+      if (e.target.closest(".cached-file-option[data-name]")) e.preventDefault();
+    });
+    cachedFileOptionsEl.addEventListener("click", (e) => {
+      const opt = e.target.closest(".cached-file-option[data-name]");
+      if (!opt) return;
+      pickCachedFile(opt.dataset.name || "");
+    });
+    cachedFileOptionsEl.addEventListener("mousemove", (e) => {
+      const opt = e.target.closest(".cached-file-option[data-name]");
+      if (!opt) return;
+      const opts = [...cachedFileOptionsEl.querySelectorAll(".cached-file-option[data-name]")];
+      const idx = opts.indexOf(opt);
+      if (idx < 0 || idx === cachedFileHighlight) return;
+      cachedFileHighlight = idx;
+      opts.forEach((el, i) => el.classList.toggle("is-active", i === idx));
+    });
+    document.addEventListener("click", (e) => {
+      if (!cachedFilePickerEl.contains(e.target)) closeCachedFileMenu();
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && isCachedFileMenuOpen()) closeCachedFileMenu();
     });
     cachedFileRefreshBtn.addEventListener("click", () => {
-      void loadCachedFilesList(cachedFileSelectEl.value);
+      void loadCachedFilesList(cachedFileSelectValue);
     });
     cachedFileBrowseBtn.addEventListener("click", () => {
       if (downloadsFileListEl.style.display === "none" || !downloadsFileListEl.style.display) {

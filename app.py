@@ -2850,25 +2850,43 @@ def _stashdb_scene_lookup(scene_id):
     return (payload.get("data") or {}).get("findScene") or {}
 
 
-def _stashdb_largest_image_url(scene):
-    """Return URL of the largest scene image by pixel area, or None."""
-    if not isinstance(scene, dict):
-        return None
-    best = None
-    best_area = -1
+def _stashdb_image_full_url(img: dict) -> str:
+    """StashDB CDN full-size image URL (JPEG/PNG as stored, not WebP preview)."""
+    if not isinstance(img, dict):
+        return ""
+    iid = (img.get("id") or "").strip()
+    if iid:
+        return f"https://stashdb.org/images/{iid}?size=full"
+    url = (img.get("url") or "").strip()
+    if not url:
+        return ""
+    parsed = urllib.parse.urlparse(url)
+    if parsed.netloc.endswith("stashdb.org") and "/images/" in parsed.path:
+        base = f"{parsed.scheme}://{parsed.netloc}{parsed.path.rstrip('/')}"
+        return f"{base}?{urllib.parse.urlencode({'size': 'full'})}"
+    return url
+
+
+def _stashdb_images_from_scene(scene: dict) -> list[dict]:
+    """Largest-first image rows with full-size StashDB URLs."""
+    images = []
     for img in scene.get("images") or []:
         if not isinstance(img, dict) or not img.get("url"):
             continue
-        try:
-            w = int(img.get("width") or 0)
-            h = int(img.get("height") or 0)
-        except (TypeError, ValueError):
-            w = h = 0
-        area = w * h
-        if area > best_area:
-            best_area = area
-            best = (img.get("url") or "").strip()
-    return best or None
+        images.append({
+            "id": img.get("id"),
+            "url": _stashdb_image_full_url(img),
+            "width": img.get("width") or 0,
+            "height": img.get("height") or 0,
+        })
+    images.sort(key=lambda i: (i.get("width") or 0) * (i.get("height") or 0), reverse=True)
+    return images
+
+
+def _stashdb_largest_image_url(scene):
+    """Return URL of the largest scene image by pixel area, or None."""
+    images = _stashdb_images_from_scene(scene if isinstance(scene, dict) else {})
+    return images[0]["url"] if images else None
 
 
 _STASHDB_COVER_MAX_BYTES = 5 * 1024 * 1024
@@ -2965,7 +2983,6 @@ def _stashdb_autofill_payload_from_scene(scene):
     studio_name, network_name = _stashdb_studio_names(scene.get("studio"))
 
     cover_url = _stashdb_largest_image_url(scene)
-    image_bbcode = f"[IMG]{cover_url}[/IMG]" if cover_url else ""
 
     return {
         "actresses": actresses,
@@ -2973,7 +2990,7 @@ def _stashdb_autofill_payload_from_scene(scene):
         "upload_date": _stashdb_pretty_date((scene.get("date") or "").strip()),
         "studio": studio_name,
         "network_studio": network_name or "",
-        "image_bbcode": image_bbcode,
+        "images": _stashdb_images_from_scene(scene),
     }
 
 
@@ -3086,7 +3103,7 @@ def _stashdb_draft_lookup(draft_id):
         + _STUDIO_GRAPHQL_FRAGMENT
         + """
             }
-            image { url width height }
+            image { id url width height }
             performers {
               __typename
               ... on Performer { name gender }
@@ -3586,7 +3603,7 @@ def _scene_fragment_to_full(scene):
             continue
         images.append({
             "id": img.get("id"),
-            "url": img.get("url"),
+            "url": _stashdb_image_full_url(img),
             "width": img.get("width") or 0,
             "height": img.get("height") or 0,
         })
@@ -5657,56 +5674,82 @@ def api_stashdb_scene_full():
     return jsonify({"ok": True, "scene": scene})
 
 
+@app.route("/api/stashdb_scene_image")
 @app.route("/api/stashdb_scene_image_png")
-def api_stashdb_scene_image_png():
-    """Fetch a StashDB scene image and re-encode as PNG.
+def api_stashdb_scene_image():
+    """Download a StashDB scene or draft cover image in its original format.
 
-    Query: ?scene_id=<id>&index=<n>  (index defaults to 0; the helper page
-    can pass index=1 to grab a backup image). The user explicitly wanted
-    PNG output because saving WebP from the StashDB website was annoying."""
+    Query: ?scene_id=<id>&index=<n>  or  ?draft_id=<id>&index=<n>
+    (index defaults to 0). Fetches ``?size=full`` from stashdb.org — no WebP→PNG conversion."""
     if not STASHDB_API_KEY:
         return jsonify({"error": "STASHDB_API_KEY is not set in container environment"}), 400
     scene_id = (request.args.get("scene_id") or "").strip()
-    if not scene_id:
-        return jsonify({"error": "scene_id is required"}), 400
+    draft_id = (request.args.get("draft_id") or "").strip()
+    if bool(scene_id) == bool(draft_id):
+        return jsonify({"error": "Provide exactly one of scene_id or draft_id"}), 400
     try:
         index = int(request.args.get("index", "0"))
     except ValueError:
         return jsonify({"error": "index must be an integer"}), 400
 
     try:
-        png_bytes = _stashdb_scene_cover_png_bytes(scene_id, index)
+        content, content_type, ext = _stashdb_stash_image_bytes(
+            scene_id=scene_id or None,
+            draft_id=draft_id or None,
+            index=index,
+        )
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except RuntimeError as e:
         return jsonify({"error": str(e)}), 502
 
-    out = BytesIO(png_bytes)
+    resource_id = scene_id or draft_id
+    out = BytesIO(content)
     out.seek(0)
     return send_file(
         out,
-        mimetype="image/png",
+        mimetype=content_type or "application/octet-stream",
         as_attachment=True,
-        download_name=f"{scene_id}_{index}.png",
+        download_name=f"{resource_id}_{index}{ext}",
     )
+
+
+def _stashdb_draft_images_sorted(draft_id: str) -> list[dict]:
+    draft = _stashdb_draft_lookup(draft_id)
+    if not draft:
+        raise ValueError("Draft not found on StashDB")
+    scene = _stashdb_scene_like_from_draft(draft)
+    if not scene:
+        raise ValueError("Only scene drafts are supported")
+    images = _stashdb_images_from_scene(scene)
+    if not images:
+        raise ValueError("Draft has no image on StashDB")
+    return images
 
 
 def _stashdb_scene_images_sorted(scene_id: str) -> list[dict]:
     raw = _stashdb_scene_full_query(scene_id)
     if not raw:
         raise ValueError("Scene not found on StashDB")
-    images = []
-    for img in raw.get("images") or []:
-        if isinstance(img, dict) and img.get("url"):
-            images.append(img)
-    images.sort(key=lambda i: (i.get("width") or 0) * (i.get("height") or 0), reverse=True)
+    images = _stashdb_images_from_scene(raw)
     if not images:
         raise ValueError("Scene has no images on StashDB")
     return images
 
 
-def _stashdb_scene_cover_png_bytes(scene_id: str, index: int = 0) -> bytes:
-    images = _stashdb_scene_images_sorted(scene_id)
+def _stashdb_stash_image_bytes(
+    *,
+    scene_id: str | None = None,
+    draft_id: str | None = None,
+    index: int = 0,
+) -> tuple[bytes, str, str]:
+    """Fetch original StashDB image bytes. Returns (content, content_type, ext)."""
+    if draft_id:
+        images = _stashdb_draft_images_sorted(draft_id)
+    elif scene_id:
+        images = _stashdb_scene_images_sorted(scene_id)
+    else:
+        raise ValueError("scene_id or draft_id is required")
     if index < 0 or index >= len(images):
         raise ValueError(f"index out of range (0..{len(images)-1})")
     src_url = images[index]["url"]
@@ -5715,23 +5758,19 @@ def _stashdb_scene_cover_png_bytes(scene_id: str, index: int = 0) -> bytes:
         r.raise_for_status()
     except requests.RequestException as e:
         raise RuntimeError(f"Failed to fetch image from StashDB: {e}") from e
+    content_type = (r.headers.get("content-type") or "").split(";")[0].strip()
+    ext = _stashdb_cover_extension(src_url, content_type)
+    if len(r.content) > _STASHDB_COVER_MAX_BYTES:
+        raise ValueError(
+            f"Image too large ({len(r.content):,} bytes); max {_STASHDB_COVER_MAX_BYTES:,}"
+        )
+    return r.content, content_type, ext
 
-    try:
-        from PIL import Image
-    except ImportError as e:
-        raise RuntimeError("Pillow is not installed; rebuild the apu image") from e
 
-    try:
-        img = Image.open(BytesIO(r.content))
-        if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
-            out_img = img.convert("RGBA")
-        else:
-            out_img = img.convert("RGB")
-        out = BytesIO()
-        out_img.save(out, format="PNG", optimize=True)
-        return out.getvalue()
-    except Exception as e:
-        raise RuntimeError(f"Failed to convert image: {e}") from e
+def _stashdb_scene_cover_png_bytes(scene_id: str, index: int = 0) -> bytes:
+    """Backward-compatible alias; returns raw image bytes (no longer PNG)."""
+    content, _content_type, _ext = _stashdb_stash_image_bytes(scene_id=scene_id, index=index)
+    return content
 
 
 def _thumb_sheet_png_bytes(video_key: str) -> bytes | None:
