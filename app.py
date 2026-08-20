@@ -6405,8 +6405,9 @@ def _finalize_upload(
                 )
 
     gofile_url = gofile_urls[0] if gofile_urls else ""
+    was_split = bool(split_info and int(split_info.get("part_count") or 0) > 1)
     if filester_part_urls:
-        if effective_filester_folder:
+        if was_split and effective_filester_folder:
             filester_url = folder_url(effective_filester_folder, provider="filester")
         else:
             filester_url = filester_part_urls[0]
@@ -6432,8 +6433,6 @@ def _finalize_upload(
 
     parts = [u for u in (gofile_url, filester_url) if u]
     jobs[job_id]["download_page"] = " | ".join(parts)
-
-    was_split = bool(split_info and int(split_info.get("part_count") or 0) > 1)
 
     source_fn = (jobs[job_id].get("source_filename") or "").strip()
     if source_fn and (gofile_url or filester_url):
