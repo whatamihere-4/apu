@@ -36,6 +36,8 @@ _SPARSE_FORWARD_STEP_SEC = 150.0
 _FULL_SCAN_MAX_BYTES = 15 * 1024**3
 _PROBE_SIZE_MARGIN = 1.10
 _PROBE_SKIP_ESTIMATE_RATIO = 0.85
+# Stream-copy parts add a small moov/ftyp overhead beyond raw packet payloads.
+_PACKET_PROBE_MARGIN = 1.03
 _MIN_SEGMENT_TIMEOUT_SEC = 300
 _EXTRACT_FLOOR_BPS = 2 * 1024 * 1024  # pessimistic VPS read+write for stream copy
 
@@ -431,6 +433,116 @@ def plan_keyframe_part_starts(
         starts.append(next_start)
 
     return starts
+
+
+def _estimate_segment_bytes(
+    start_sec: float,
+    end_sec: float,
+    bytes_per_sec: float,
+) -> int:
+    return int(max(0.0, end_sec - start_sec) * bytes_per_sec * _PROBE_SIZE_MARGIN)
+
+
+def _probe_segment_packet_bytes(
+    path: str,
+    start_sec: float,
+    end_sec: float,
+    duration: float,
+    *,
+    probe_timeout: int = 300,
+) -> int | None:
+    """Sum media packet payload sizes in ``[start_sec, end_sec)`` via ffprobe."""
+    if end_sec <= start_sec + _KEYFRAME_EPS:
+        return 0
+    interval = _format_read_interval(start_sec, end_sec, duration)
+    proc = subprocess.run(
+        [
+            FFPROBE_BIN,
+            "-v",
+            "error",
+            "-read_intervals",
+            interval,
+            "-show_entries",
+            "packet=size",
+            "-of",
+            "csv=p=0",
+            path,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=probe_timeout,
+    )
+    if proc.returncode != 0:
+        return None
+    total = 0
+    for line in (proc.stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            total += int(line.split(",")[0])
+        except ValueError:
+            continue
+    return total
+
+
+def _validate_planned_parts(
+    path: str,
+    part_starts: list[float],
+    duration: float,
+    max_bytes: int,
+    *,
+    bytes_per_sec: float,
+    probe_timeout: int,
+    on_log=None,
+) -> tuple[bool, str | None]:
+    """Return whether every planned segment fits under ``max_bytes``.
+
+    Estimates all segments first; ffprobe packet sums are used for any segment
+    whose estimate is within ``_PROBE_SKIP_ESTIMATE_RATIO`` of the limit.
+    """
+    num_parts = len(part_starts)
+    probe_threshold = int(max_bytes * _PROBE_SKIP_ESTIMATE_RATIO)
+    for idx, start in enumerate(part_starts):
+        end = part_starts[idx + 1] if idx + 1 < num_parts else duration
+        if end - start <= _KEYFRAME_EPS:
+            continue
+        part_no = idx + 1
+        est = _estimate_segment_bytes(start, end, bytes_per_sec)
+        if est > max_bytes:
+            return (
+                False,
+                f"part {part_no} estimate {est:,} bytes (> {max_bytes:,})",
+            )
+        if est <= probe_threshold:
+            continue
+        if on_log:
+            on_log(
+                f"[split] validating part {part_no}/{num_parts} "
+                f"(est {est:,} bytes) via ffprobe packet sum…"
+            )
+        probed = _probe_segment_packet_bytes(
+            path, start, end, duration, probe_timeout=probe_timeout,
+        )
+        if probed is None:
+            return (
+                False,
+                f"part {part_no} ffprobe packet probe failed "
+                f"({start:.1f}s–{end:.1f}s)",
+            )
+        with_margin = int(probed * _PACKET_PROBE_MARGIN)
+        if on_log:
+            on_log(
+                f"[split] part {part_no}/{num_parts}: "
+                f"{probed:,} bytes probed (+margin → {with_margin:,})"
+            )
+        if with_margin > max_bytes:
+            return (
+                False,
+                f"part {part_no} probed {probed:,} bytes "
+                f"(+margin {with_margin:,} > {max_bytes:,})",
+            )
+    return True, None
 
 
 def plan_sparse_keyframe_part_starts(
@@ -1033,58 +1145,17 @@ def iter_upload_parts_sliced(
             path, duration, trial_segment_time,
             probe_timeout=probe_timeout, file_size=size,
         )
-        probe_name = f"{stem}.PART1{ext}"
-        probe_path = os.path.join(output_dir, probe_name)
-        try:
-            if os.path.isfile(probe_path):
-                os.remove(probe_path)
-        except OSError:
-            pass
-
-        first_end = trial_starts[1] if len(trial_starts) > 1 else duration
-        est_probe_size = int((first_end - trial_starts[0]) * bytes_per_sec * _PROBE_SIZE_MARGIN)
-        probe_skip_threshold = int(max_bytes * _PROBE_SKIP_ESTIMATE_RATIO)
-        if est_probe_size > probe_skip_threshold:
-            if on_log:
-                on_log(
-                    f"[split] probe slice starting (est {est_probe_size:,} bytes)…"
-                )
-            t_probe = time.monotonic()
-            _extract_single_segment(
-                path,
-                probe_path,
-                0,
-                first_end,
-                duration=duration,
-                file_size=size,
-                max_timeout=ffmpeg_timeout,
-                extract_backend=backend,
-                on_log=on_log,
-                should_cancel=should_cancel,
-            )
-            probe_size = os.path.getsize(probe_path)
-            if on_log:
-                on_log(
-                    f"[split] probe slice done in {time.monotonic() - t_probe:.1f}s "
-                    f"({probe_size:,} bytes)"
-                )
-            try:
-                os.remove(probe_path)
-            except OSError:
-                pass
-        else:
-            if on_log:
-                on_log(
-                    f"Skipping probe slice (est {est_probe_size:,} bytes "
-                    f"≤ {probe_skip_threshold:,} threshold)"
-                )
-            probe_size = est_probe_size
-
-        if probe_size > max_bytes:
-            last_err = (
-                f"first slice exceeded limit at factor {factor} "
-                f"({probe_size:,} > {max_bytes:,} bytes)"
-            )
+        ok, err = _validate_planned_parts(
+            path,
+            trial_starts,
+            duration,
+            max_bytes,
+            bytes_per_sec=bytes_per_sec,
+            probe_timeout=probe_timeout,
+            on_log=on_log,
+        )
+        if not ok:
+            last_err = f"{err} at factor {factor}"
             if on_log:
                 on_log(last_err)
             continue

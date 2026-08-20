@@ -10,11 +10,13 @@ if str(PY_DIR) not in sys.path:
     sys.path.insert(0, str(PY_DIR))
 
 from file_splitter import (
+    _estimate_segment_bytes,
     _format_mkvmerge_time,
     _format_read_interval,
     _mkvmerge_split_spec,
     _scaled_segment_timeout,
     _select_keyframe_at_or_after,
+    _validate_planned_parts,
     format_mkvmerge_rejoin_command,
     plan_keyframe_part_starts,
     plan_sparse_keyframe_part_starts,
@@ -73,6 +75,46 @@ class MkvmergeHelperTests(unittest.TestCase):
             format_mkvmerge_rejoin_command("movie", ".mp4", 3),
             "mkvmerge -o movie.mp4 movie.PART1.mp4 +movie.PART2.mp4 +movie.PART3.mp4",
         )
+
+
+class ValidatePlannedPartsTests(unittest.TestCase):
+    def test_rejects_oversized_estimate_for_any_part(self) -> None:
+        # Two equal halves of a 22 GiB file at average bitrate: each ~11 GiB estimate.
+        duration = 7200.0
+        size = 22 * 1024**3
+        bytes_per_sec = size / duration
+        starts = [0.0, 3600.0]
+        ok, err = _validate_planned_parts(
+            "/nonexistent",
+            starts,
+            duration,
+            10 * 1024**3,
+            bytes_per_sec=bytes_per_sec,
+            probe_timeout=60,
+        )
+        self.assertFalse(ok)
+        self.assertIn("estimate", err or "")
+
+    def test_accepts_small_parts_without_probe(self) -> None:
+        duration = 7200.0
+        size = 5 * 1024**3
+        bytes_per_sec = size / duration
+        starts = [0.0, 3600.0]
+        ok, err = _validate_planned_parts(
+            "/nonexistent",
+            starts,
+            duration,
+            10 * 1024**3,
+            bytes_per_sec=bytes_per_sec,
+            probe_timeout=60,
+        )
+        self.assertTrue(ok)
+        self.assertIsNone(err)
+
+    def test_estimate_segment_bytes_applies_margin(self) -> None:
+        raw = 1000.0 * 1_000_000
+        est = _estimate_segment_bytes(0.0, 1000.0, 1_000_000.0)
+        self.assertEqual(est, int(raw * 1.10))
 
 
 class SparsePlanTests(unittest.TestCase):

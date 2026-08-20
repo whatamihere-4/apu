@@ -238,6 +238,38 @@ JOB_LINKS_FILENAME_ONLY = _env_yes("JOB_LINKS_FILENAME_ONLY", default="0")
 HASHER_ALGORITHMS = ("OSHASH", "PHASH")
 
 
+def _cached_files_sort_mode(raw: str | None = None) -> str:
+    """Normalize CACHED_FILES_SORT to alpha | chron | reverse_chron."""
+    value = (raw if raw is not None else os.environ.get("CACHED_FILES_SORT") or "reverse_chron")
+    key = value.strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "alpha": "alpha",
+        "alphabetical": "alpha",
+        "name": "alpha",
+        "az": "alpha",
+        "a_z": "alpha",
+        "chron": "chron",
+        "chrono": "chron",
+        "chronological": "chron",
+        "oldest": "chron",
+        "oldest_first": "chron",
+        "reverse_chron": "reverse_chron",
+        "reverse_chrono": "reverse_chron",
+        "reverse_chronological": "reverse_chron",
+        "rchron": "reverse_chron",
+        "newest": "reverse_chron",
+        "newest_first": "reverse_chron",
+    }
+    mode = aliases.get(key)
+    if mode:
+        return mode
+    print(f"[CONFIG] Invalid CACHED_FILES_SORT={value!r}; using reverse_chron", flush=True)
+    return "reverse_chron"
+
+
+CACHED_FILES_SORT = _cached_files_sort_mode()
+
+
 def _hasher_sidecar_configured() -> bool:
     return bool(HASHER_HTTP_URL)
 
@@ -5245,6 +5277,35 @@ def _join_phash_followup_thread(job_id: str, *, timeout: float | None = None) ->
         )
 
 
+def _cached_file_sort_ts(entry: dict) -> str:
+    """Latest ISO timestamp on a scenes.json row (lexicographic ISO-8601 UTC)."""
+    if not isinstance(entry, dict):
+        return ""
+    candidates = [entry.get("computed_at") or ""]
+    for key in ("stashdb", "upload", "split", "bbcode"):
+        nested = entry.get(key)
+        if not isinstance(nested, dict):
+            continue
+        candidates.append(nested.get("checked_at") or "")
+        candidates.append(nested.get("recorded_at") or "")
+        candidates.append(nested.get("saved_at") or "")
+    return max((str(c).strip() for c in candidates if str(c).strip()), default="")
+
+
+def _sort_cached_files(files: list[dict], mode: str | None = None) -> list[dict]:
+    """Order cached-file dropdown rows: alpha, chron, or reverse_chron."""
+    sort_mode = mode or CACHED_FILES_SORT
+    if sort_mode == "alpha":
+        files.sort(key=lambda f: f.get("filename") or "")
+        return files
+    reverse = sort_mode == "reverse_chron"
+    files.sort(
+        key=lambda f: (f.get("sort_ts") or "", f.get("filename") or ""),
+        reverse=reverse,
+    )
+    return files
+
+
 @app.route("/api/cached_files")
 def api_cached_files():
     """List paths under /downloads documented in scenes.json (all files we have ever hashed)."""
@@ -5252,10 +5313,9 @@ def api_cached_files():
     with _scenes_lock:
         data = _scenes_load()
     files = []
-    for fn in sorted(data.keys()):
+    for fn, entry in data.items():
         if q and q not in fn.lower():
             continue
-        entry = data.get(fn)
         if not isinstance(entry, dict):
             continue
         stash = entry.get("stashdb") if isinstance(entry.get("stashdb"), dict) else {}
@@ -5268,8 +5328,12 @@ def api_cached_files():
             "edit_id": edit_id or None,
             "draft_id": draft_id or None,
             "matched_by": stash.get("matched_by"),
+            "sort_ts": _cached_file_sort_ts(entry),
         })
-    return jsonify({"ok": True, "files": files})
+    _sort_cached_files(files)
+    for row in files:
+        row.pop("sort_ts", None)
+    return jsonify({"ok": True, "files": files, "sort": CACHED_FILES_SORT})
 
 
 @app.route("/api/scenes_stashdb_link", methods=["POST"])
