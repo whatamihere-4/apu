@@ -5692,40 +5692,50 @@ def api_stashdb_scene_full():
 @app.route("/api/stashdb_scene_image")
 @app.route("/api/stashdb_scene_image_png")
 def api_stashdb_scene_image():
-    """Download a StashDB scene or draft cover image in its original format.
+    """Download a StashDB scene, draft, or image in its original format.
 
-    Query: ?scene_id=<id>&index=<n>  or  ?draft_id=<id>&index=<n>
-    (index defaults to 0). Fetches ``?size=full`` from stashdb.org — no WebP→PNG conversion."""
+    Query: ?scene_id=<id>&index=<n>  |  ?draft_id=<id>&index=<n>
+    |  ?image_id=<stashdb-image-uuid>  (index ignored for image_id).
+    Fetches ``?size=full`` from stashdb.org — no WebP→PNG conversion."""
     if not STASHDB_API_KEY:
         return jsonify({"error": "STASHDB_API_KEY is not set in container environment"}), 400
     scene_id = (request.args.get("scene_id") or "").strip()
     draft_id = (request.args.get("draft_id") or "").strip()
-    if bool(scene_id) == bool(draft_id):
-        return jsonify({"error": "Provide exactly one of scene_id or draft_id"}), 400
+    image_id = (request.args.get("image_id") or "").strip()
+    mode_count = sum(1 for x in (scene_id, draft_id, image_id) if x)
+    if mode_count != 1:
+        return jsonify({"error": "Provide exactly one of scene_id, draft_id, or image_id"}), 400
     try:
         index = int(request.args.get("index", "0"))
     except ValueError:
         return jsonify({"error": "index must be an integer"}), 400
 
     try:
-        content, content_type, ext = _stashdb_stash_image_bytes(
-            scene_id=scene_id or None,
-            draft_id=draft_id or None,
-            index=index,
-        )
+        if image_id:
+            src_url = f"https://stashdb.org/images/{image_id}?size=full"
+            content, content_type, ext = _stashdb_fetch_image_url(src_url)
+            resource_id = image_id
+            file_index = 0
+        else:
+            content, content_type, ext = _stashdb_stash_image_bytes(
+                scene_id=scene_id or None,
+                draft_id=draft_id or None,
+                index=index,
+            )
+            resource_id = scene_id or draft_id
+            file_index = index
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except RuntimeError as e:
         return jsonify({"error": str(e)}), 502
 
-    resource_id = scene_id or draft_id
     out = BytesIO(content)
     out.seek(0)
     return send_file(
         out,
         mimetype=content_type or "application/octet-stream",
         as_attachment=True,
-        download_name=f"{resource_id}_{index}{ext}",
+        download_name=f"{resource_id}_{file_index}{ext}",
     )
 
 

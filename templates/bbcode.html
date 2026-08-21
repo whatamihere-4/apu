@@ -747,19 +747,22 @@
       if (activeDraftId) activeSceneId = "";
     }
 
+    function stashImageIdFromUrl(url) {
+      const m = String(url || "").match(/stashdb\.org\/images\/([a-f0-9-]+)/i);
+      return m ? m[1] : "";
+    }
+
     function stashIdsFromLink(url) {
       const text = String(url || "").trim();
       const mScene = text.match(/stashdb\.org\/scenes\/([a-f0-9-]+)/i);
       if (mScene) return { scene_id: mScene[1] };
-      const mDraft = text.match(/stashdb\.org\/drafts\/([a-f0-9-]+)/i);
+      const mDraft = text.match(/stashdb\.org\/drafts?\/([a-f0-9-]+)/i);
       if (mDraft) return { draft_id: mDraft[1] };
       return {};
     }
 
     function hasStashImageResource() {
-      if (activeSceneId || activeDraftId) return true;
-      const parsed = stashIdsFromLink(stashdbLinkEl.value);
-      return !!(parsed.scene_id || parsed.draft_id);
+      return !!stashImageDownloadQuery(imageIndex);
     }
 
     function stashImageDownloadQuery(index) {
@@ -770,15 +773,30 @@
         sceneId = parsed.scene_id || "";
         draftId = parsed.draft_id || "";
       }
-      if (!sceneId && !draftId) return "";
       const q = new URLSearchParams({ index: String(index) });
-      if (sceneId) q.set("scene_id", sceneId);
-      else q.set("draft_id", draftId);
-      return q.toString();
+      if (sceneId) {
+        q.set("scene_id", sceneId);
+        return q.toString();
+      }
+      if (draftId) {
+        q.set("draft_id", draftId);
+        return q.toString();
+      }
+      const img = sceneImages[index] || sceneImages[0];
+      if (img) {
+        const imageId = String(img.id || "").trim() || stashImageIdFromUrl(img.url);
+        if (imageId) {
+          q.set("image_id", imageId);
+          return q.toString();
+        }
+      }
+      return "";
     }
 
     function stashImageResourceLabel() {
-      return activeSceneId || activeDraftId || "stashdb";
+      const img = sceneImages[imageIndex];
+      const imageId = img && (String(img.id || "").trim() || stashImageIdFromUrl(img.url));
+      return activeSceneId || activeDraftId || imageId || "stashdb";
     }
 
     function escAttr(value) {
@@ -1571,7 +1589,7 @@ ${threadRow}${linkRow}${mirrorRow}[/TABLE]${filesterMergeFooter}`;
       imageMetaEl.textContent = `Image ${imageIndex + 1} / ${sceneImages.length}` +
                                 (dims ? `  ·  ${dims}` : "");
       openOriginalEl.href = img.url;
-      const canDownload = hasStashImageResource() && sceneImages.length > 0;
+      const canDownload = !!stashImageDownloadQuery(imageIndex);
       downloadPngEl.disabled = !canDownload;
       downloadBothBtn.disabled = !canDownload;
       refreshSlrGifControls();
